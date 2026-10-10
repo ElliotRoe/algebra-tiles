@@ -21,12 +21,16 @@ polynomial, whichever was typed. Anything tiles can build is allowed:
   `x^2-x-6`, `6x^2+x-2`, `x^2-9` or `4x+6`.
 
 Anything else is refused with the reason, as it's typed. The teacher also picks
-what students start with, each choice showing the tiles it gives for the
-problem typed: all the tiles they need (for Multiply, both sides' tiles and the
-rectangle's; for Factor, the rectangle's, zero pairs included), only the
-positive ones (Factor only), or none. The page then gives the student link, a
-QR code, and a way to try it as a student. One link is one problem, carried in
-the link: `/play?type=factor&p=x^2-x-6&start=positive`.
+what students start with, for either activity type: all the tiles they need
+(for Multiply, both sides' tiles and the rectangle's; for Factor, the
+rectangle's, zero pairs included), only the positive ones, or none. A box
+beside the choices shows the tiles the chosen one gives for the problem typed.
+On the right, the page gives the student link, a QR code, and a way to try it
+as a student. One link is one problem, carried in the link:
+`/play?type=factor&p=x^2-x-6&start=positive`.
+
+A help button in the bottom-left corner of the window gives the support email,
+and the footer links to the About and Privacy pages.
 
 ## Doing a problem (`/play`)
 
@@ -52,7 +56,8 @@ Shift-click several, or Ctrl/⌘ + A for all of them, for their buttons: Turn,
 Flip (to the opposite sign), Duplicate (Ctrl/⌘ + D), Delete, and **Cancel
 out** when one tile lies flush against its opposite, which rumbles the pair,
 slides them into each other and poofs. Dragging a selected tile moves the whole
-selection. Ctrl/⌘ + Z and Ctrl/⌘ + Shift + Z undo and redo, back to the last
+selection. Ctrl/⌘ + C, X and V copy, cut and paste tiles, pasting at the
+pointer. Ctrl/⌘ + Z and Ctrl/⌘ + Shift + Z undo and redo, back to the last
 passed Check.
 
 Each Check marks what's wrong in red; only a passed Check opens the next step,
@@ -77,6 +82,8 @@ multiplied. One that's equal but not simplified gets a nudge.
   rectangle and the like-term groups. Positions on the mat are kept as so many
   x's plus so many units, and the checks read those, never pixels.
 - `src/lib/settings.ts`: the tiles an activity starts with.
+- `src/lib/support.ts`: the support email, used by the help box, About and
+  Privacy.
 - `src/lib/Activity.svelte`: the student's board and its steps.
 - `vendor/`: Caret, the math field, packed from a local clone by
   `bun run caret` (see ADR 0003).

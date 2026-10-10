@@ -727,6 +727,72 @@
 		select([...selected].filter((id) => !gone.has(id)));
 	}
 
+	/** Tiles copied with Ctrl/⌘ + C or X: what they are, and where each sits from
+	 *  the top-left of them all. Kept in the page, not the system clipboard. */
+	let clipboard: { kind: Kind; sign: Sign; turned: boolean; ox: number; oy: number }[] = [];
+	/** Where the pointer last was on screen, to paste there. */
+	let pointerAt: { x: number; y: number } | null = null;
+	/** Where the last paste went, and how many pastes in a row have gone there,
+	 *  so pasting again without moving steps each copy on instead of stacking them. */
+	let pasted: { at: { x: number; y: number } | null; n: number } = { at: null, n: 0 };
+
+	function copy(ids: number[]): boolean {
+		const chosen = tiles.filter((t) => ids.includes(t.id) && movable(t) && !vanished(t));
+		if (!chosen.length) return false;
+		const box = bounds(chosen.map(rectOf));
+		clipboard = chosen.map((t) => ({
+			kind: t.kind,
+			sign: t.sign,
+			turned: t.turned,
+			ox: t.x - box.x,
+			oy: t.y - box.y
+		}));
+		pasted = { at: null, n: 0 };
+		return true;
+	}
+
+	/** The copied tiles, set down centred on the pointer when it's over the board,
+	 *  or else in the middle of the view. Pasting again in the same place steps
+	 *  down and right. One tile snaps like a dropped one. The pasted tiles are selected. */
+	function paste() {
+		if (!clipboard.length || step === 'done' || !boardEl) return;
+		const w = Math.max(...clipboard.map((c) => c.ox + lenPx(size(c.kind, c.turned).w)));
+		const h = Math.max(...clipboard.map((c) => c.oy + lenPx(size(c.kind, c.turned).h)));
+		const r = boardEl.getBoundingClientRect();
+		const over =
+			pointerAt &&
+			pointerAt.x >= r.left &&
+			pointerAt.x <= r.right &&
+			pointerAt.y >= r.top &&
+			pointerAt.y <= r.bottom;
+		const at = over ? pointerAt! : { x: r.left + boardW / 2, y: r.top + boardH / 2 };
+		const again = pasted.at?.x === at.x && pasted.at?.y === at.y;
+		pasted = { at, n: again ? pasted.n + 1 : 0 };
+		const pt = toBoard(at.x, at.y);
+		const x = pt.x - w / 2 + pasted.n * UNIT;
+		const y = pt.y - h / 2 + pasted.n * UNIT;
+		const made = clipboard.map((c) => ({
+			id: nextId++,
+			kind: c.kind,
+			sign: c.sign,
+			turned: c.turned
+		}));
+		if (made.length === 1) {
+			change(land(made[0], x, y));
+		} else {
+			change([
+				...tiles,
+				...made.map((t, i) => ({
+					...t,
+					x: x + clipboard[i].ox,
+					y: y + clipboard[i].oy,
+					at: { x: null, y: null }
+				}))
+			]);
+		}
+		select(made.map((t) => t.id));
+	}
+
 	const bounds = (rects: Rect[]): Rect => {
 		const x = Math.min(...rects.map((r) => r.x));
 		const y = Math.min(...rects.map((r) => r.y));
@@ -998,6 +1064,14 @@
 		} else if (mod && k === 'd') {
 			e.preventDefault();
 			duplicate([...selected]);
+		} else if (mod && (k === 'c' || k === 'x') && !e.shiftKey && !e.altKey) {
+			// With no tiles selected, leave it to the browser, to copy text.
+			if (window.getSelection()?.toString() || !copy([...selected])) return;
+			e.preventDefault();
+			if (k === 'x') remove([...selected]);
+		} else if (mod && k === 'v' && !e.shiftKey && !e.altKey && clipboard.length) {
+			e.preventDefault();
+			paste();
 		} else if ((e.key === 'Delete' || e.key === 'Backspace') && selected.size) {
 			e.preventDefault();
 			remove([...selected]);
@@ -1016,7 +1090,10 @@
 </script>
 
 <svelte:window
-	onpointermove={dragMove}
+	onpointermove={(e) => {
+		pointerAt = { x: e.clientX, y: e.clientY };
+		dragMove(e);
+	}}
 	onpointerup={dragUp}
 	onkeydown={key}
 	onkeyup={keyUp}

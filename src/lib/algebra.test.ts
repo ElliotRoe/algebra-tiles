@@ -162,8 +162,17 @@ describe('starting tiles', () => {
 		]);
 	});
 
-	test('a start a type doesn’t offer falls back to all the tiles', () => {
-		expect(readStart('multiply', 'positive')).toBe('all');
-		expect(readStart('factor', 'positive')).toBe('positive');
+	test('Multiply can start with only the positive tiles', () => {
+		const p = ok(readProblem('multiply', '(x+2)(x-3)'));
+		expect(startingPiles(p, 'positive')).toEqual([
+			{ kind: 'x2', sign: 1, n: 1 },
+			{ kind: 'x', sign: 1, n: 4 },
+			{ kind: 'unit', sign: 1, n: 2 }
+		]);
+	});
+
+	test('an unknown start falls back to all the tiles', () => {
+		expect(readStart('positive')).toBe('positive');
+		expect(readStart('lots')).toBe('all');
 	});
 });

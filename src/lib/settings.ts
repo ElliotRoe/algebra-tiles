@@ -1,38 +1,28 @@
 // What tiles an activity starts with, set by the teacher and carried in the
 // link as `start`.
 
-import type { ActivityType, Problem } from './algebra';
+import type { Problem } from './algebra';
 import type { Kind, Sign } from './mat';
 
-/** Every tile the student needs, only the positive ones (Factor), or none. */
+/** Every tile the student needs, only the positive ones, or none. */
 export type Start = 'all' | 'positive' | 'none';
 
-export const STARTS: Record<ActivityType, { value: Start; name: string; about: string }[]> = {
-	multiply: [
-		{
-			value: 'all',
-			name: 'All the tiles they need',
-			about: 'The tiles for both sides and the rectangle, ready to sort out.'
-		},
-		{ value: 'none', name: 'No tiles', about: 'Students bring out every tile from the tray.' }
-	],
-	factor: [
-		{
-			value: 'all',
-			name: 'All the tiles they need',
-			about: 'Every tile the rectangle takes, zero pairs included, ready to arrange.'
-		},
-		{
-			value: 'positive',
-			name: 'Only the positive tiles',
-			about: 'Students bring out the negative tiles themselves.'
-		},
-		{ value: 'none', name: 'No tiles', about: 'Students bring out every tile from the tray.' }
-	]
-};
+export const STARTS: { value: Start; name: string; about: string }[] = [
+	{
+		value: 'all',
+		name: 'All the tiles they need',
+		about: 'Ready to arrange, zero pairs included.'
+	},
+	{
+		value: 'positive',
+		name: 'Only the positive tiles',
+		about: 'Students bring out the negative tiles themselves.'
+	},
+	{ value: 'none', name: 'No tiles', about: 'Students bring out every tile from the tray.' }
+];
 
-export const readStart = (type: ActivityType, value: string | null): Start =>
-	STARTS[type].find((s) => s.value === value)?.value ?? 'all';
+export const readStart = (value: string | null): Start =>
+	STARTS.find((s) => s.value === value)?.value ?? 'all';
 
 export interface Pile {
 	kind: Kind;
@@ -57,10 +47,9 @@ export function rectangleTiles(problem: Extract<Problem, { ok: true }>): Pile[] 
 export function startingPiles(problem: Extract<Problem, { ok: true }>, start: Start): Pile[] {
 	if (start === 'none') return [];
 	const rect = rectangleTiles(problem);
-	if (problem.type === 'factor')
-		return start === 'positive' ? rect.filter((p) => p.sign > 0) : rect;
 	const sides = problem.factors.flatMap((f) => [...signed('x', f.x), ...signed('unit', f.unit)]);
-	return piles([...sides, ...rect]);
+	const all = problem.type === 'factor' ? rect : piles([...sides, ...rect]);
+	return start === 'positive' ? all.filter((p) => p.sign > 0) : all;
 }
 
 const signed = (kind: Kind, n: number): Pile[] =>

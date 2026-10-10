@@ -10,7 +10,7 @@
 	const params = $derived(page.url.searchParams);
 	const type = $derived<ActivityType>(params.get('type') === 'factor' ? 'factor' : 'multiply');
 	const problem = $derived(readProblem(type, params.get('p') ?? ''));
-	const start = $derived(readStart(type, params.get('start')));
+	const start = $derived(readStart(params.get('start')));
 	const title = $derived(
 		`${type === 'factor' ? 'Factor' : 'Multiply'} ${problem.ok ? prettyText(problem.given) : ''}`
 	);
