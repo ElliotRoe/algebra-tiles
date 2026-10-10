@@ -1,12 +1,12 @@
 <script lang="ts">
 	// The foot of the site's pages: who made the tool, About and Privacy, and a
 	// help button pinned to the bottom-left corner of the window.
-	import { CircleQuestionMark, X } from '@lucide/svelte';
+	import { CircleQuestionMark } from '@lucide/svelte';
 	import { resolve } from '$app/paths';
 	import logo from '$lib/assets/edtechathon-logo.svg';
-	import { SUPPORT_EMAIL } from '$lib/support';
+	import EmailDialog from '$lib/EmailDialog.svelte';
 
-	let help = $state<HTMLDialogElement>();
+	let help = $state<EmailDialog>();
 </script>
 
 <footer>
@@ -15,7 +15,7 @@
 		class="help"
 		aria-label="Help"
 		aria-haspopup="dialog"
-		onclick={() => help?.showModal()}
+		onclick={() => help?.open()}
 	>
 		<CircleQuestionMark size={20} aria-hidden="true" />
 	</button>
@@ -27,25 +27,9 @@
 	<a class="link" href={resolve('/privacy')}>privacy</a>
 </footer>
 
-<!-- A click on the backdrop, outside the box, closes it too. -->
-<dialog
-	bind:this={help}
-	aria-labelledby="help-title"
-	onclick={(e) => e.target === help && help.close()}
->
-	<div class="box">
-		<header>
-			<h2 id="help-title">Need a hand?</h2>
-			<button type="button" class="close" aria-label="Close help" onclick={() => help?.close()}>
-				<X size={18} />
-			</button>
-		</header>
-		<p>
-			If you’re running into trouble or have suggestions, email us at
-			<a href="mailto:{SUPPORT_EMAIL}?subject=Algebra%20Tiles">{SUPPORT_EMAIL}</a>.
-		</p>
-	</div>
-</dialog>
+<EmailDialog bind:this={help} title="Need a hand?" subject="Algebra Tiles">
+	<p>If you’re running into trouble or have suggestions, email us and we’ll help.</p>
+</EmailDialog>
 
 <style>
 	footer {
@@ -92,54 +76,5 @@
 	.help:focus-visible {
 		background: var(--accent-wash);
 		color: var(--accent);
-	}
-	dialog {
-		width: min(27rem, calc(100vw - 2rem));
-		margin: auto;
-		padding: 0;
-		border: none;
-		border-radius: 12px;
-		background: var(--paper);
-		color: var(--ink);
-		box-shadow: 0 18px 60px rgb(29 40 56 / 0.24);
-	}
-	dialog::backdrop {
-		background: rgb(29 40 56 / 0.35);
-	}
-	.box {
-		padding: 1.25rem;
-	}
-	header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		margin-bottom: 0.6rem;
-	}
-	h2 {
-		font-size: 1.15rem;
-		font-weight: 700;
-	}
-	.close {
-		display: grid;
-		place-items: center;
-		width: 2rem;
-		height: 2rem;
-		border: none;
-		border-radius: 8px;
-		background: none;
-		color: var(--muted);
-		cursor: pointer;
-	}
-	.close:hover {
-		background: var(--paper-low);
-	}
-	p {
-		font-size: 0.95rem;
-		line-height: 1.6;
-	}
-	p a {
-		color: var(--accent);
-		font-weight: 600;
-		text-underline-offset: 4px;
 	}
 </style>

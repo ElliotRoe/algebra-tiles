@@ -29,8 +29,9 @@ On the right, the page gives the student link, a QR code, and a way to try it
 as a student. One link is one problem, carried in the link:
 `/play?type=factor&p=x^2-x-6&start=positive`.
 
-A help button in the bottom-left corner of the window gives the support email,
-and the footer links to the About and Privacy pages.
+Under the two activity types, a dashed button asks teachers to suggest another
+activity, by email. A help button in the bottom-left corner of the window gives
+the support email, and the footer links to the About and Privacy pages.
 
 ## Doing a problem (`/play`)
 

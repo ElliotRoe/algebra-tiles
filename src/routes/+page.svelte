@@ -2,7 +2,7 @@
 	// The teacher's page: choose Multiply or Factor, type one problem, and share
 	// it as a link (see docs/adr/0001-one-link-one-problem.md). Nothing is saved;
 	// the link carries the problem.
-	import { Check, Copy, ExternalLink, QrCode } from '@lucide/svelte';
+	import { Check, Copy, ExternalLink, Plus, QrCode } from '@lucide/svelte';
 	import { onMount } from 'svelte';
 	import { resolve } from '$app/paths';
 	import { formatPoly, prettyText, readProblem, type ActivityType } from '$lib/algebra';
@@ -10,12 +10,15 @@
 	import MathInput from '$lib/MathInput.svelte';
 	import TileView from '$lib/TileView.svelte';
 	import Footer from '$lib/Footer.svelte';
+	import EmailDialog from '$lib/EmailDialog.svelte';
 	import { makeQr, qrExtent, qrPath, qrPng } from '$lib/qr';
 	import favicon from '$lib/assets/favicon.svg';
 
 	let type = $state<ActivityType>('multiply');
 	let text = $state('');
 	let start = $state<Start>('all');
+	let suggest = $state<EmailDialog>();
+	const IDEA_BODY = "Here's something I'd like students to do with algebra tiles:\n\n";
 	let origin = $state('');
 	onMount(() => (origin = window.location.origin));
 
@@ -135,6 +138,13 @@
 					</button>
 				{/each}
 			</div>
+			<button type="button" class="suggest" aria-haspopup="dialog" onclick={() => suggest?.open()}>
+				<span class="plus"><Plus size={18} aria-hidden="true" /></span>
+				<span>
+					<span class="suggest-title">Want students doing something else?</span>
+					<span class="suggest-text">Suggest another algebra tiles activity for us to add.</span>
+				</span>
+			</button>
 
 			<label class="field-label" for="problem">
 				{type === 'multiply'
@@ -256,6 +266,18 @@
 	</div>
 
 	<Footer />
+	<EmailDialog
+		bind:this={suggest}
+		title="Suggest an activity"
+		subject="Algebra Tiles activity idea"
+		body={IDEA_BODY}
+	>
+		<p>
+			So far students can multiply and factor polynomials. What else would you like them to do with
+			algebra tiles? Solving equations, completing the square, something else? Email us your idea
+			and we’ll look at adding it.
+		</p>
+	</EmailDialog>
 </div>
 
 <style>
@@ -338,6 +360,44 @@
 	.type.chosen {
 		border-color: var(--accent);
 		background: var(--accent-wash);
+	}
+	/* Asking for a kind of activity we don't have yet, under the ones we do. */
+	.suggest {
+		display: flex;
+		align-items: center;
+		gap: 0.75rem;
+		width: 100%;
+		margin-top: 0.75rem;
+		padding: 0.7rem 0.85rem;
+		border: 2px dashed var(--line-strong);
+		border-radius: 12px;
+		background: none;
+		color: var(--ink);
+		text-align: left;
+		cursor: pointer;
+	}
+	.suggest:hover {
+		border-color: var(--accent);
+		background: var(--accent-wash);
+	}
+	.plus {
+		display: grid;
+		flex: none;
+		place-items: center;
+		width: 2rem;
+		height: 2rem;
+		border-radius: 50%;
+		background: var(--accent-wash);
+		color: var(--accent);
+	}
+	.suggest-title {
+		display: block;
+		font-weight: 700;
+	}
+	.suggest-text {
+		display: block;
+		color: var(--muted);
+		font-size: 0.88rem;
 	}
 	.picture {
 		display: flex;
