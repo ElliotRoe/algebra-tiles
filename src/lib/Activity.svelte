@@ -14,7 +14,7 @@
 	// Tiles behave the same everywhere and can go anywhere: they snap to the
 	// edges near them (a side of the T holds a single row), keep whichever way
 	// they face until the student turns them, and a tile pushed flush against
-	// its opposite can cancel out with it. A side of the T holds one row, laid
+	// its opposite can zero out with it. A side of the T holds one row, laid
 	// end to end from the corner, so a tile dropped there slides into place; a
 	// tile there can't be turned.
 	import { onMount, tick } from 'svelte';
@@ -117,7 +117,7 @@
 				p.type === 'multiply'
 					? 'Fill in the rectangle. Each tile fits its row and column, and takes their signs multiplied.'
 					: 'Make a rectangle in the corner of the T. Add zero pairs if you need them.',
-			groups: 'Sort the tiles into their groups, and cancel out the zero pairs.',
+			groups: 'Sort the tiles into their groups, and zero out the zero pairs.',
 			equation:
 				p.type === 'multiply'
 					? 'Write the product with like terms combined.'
@@ -220,14 +220,14 @@
 	 *  the T has faded, its sides are gone. */
 	const arrange = (next: Tile[]) => (faded ? next : packSides(next, ARM, (t) => locked.has(t.id)));
 	function undo() {
-		if (!past.length || cancelling) return;
+		if (!past.length || zeroing) return;
 		future = [...future, tiles];
 		tiles = past[past.length - 1];
 		past = past.slice(0, -1);
 		afterHistory();
 	}
 	function redo() {
-		if (!future.length || cancelling) return;
+		if (!future.length || zeroing) return;
 		past = [...past, tiles];
 		tiles = future[future.length - 1];
 		future = future.slice(0, -1);
@@ -313,7 +313,7 @@
 	}
 
 	async function check() {
-		if (cancelling) return;
+		if (zeroing) return;
 		clearMarks();
 		const result = checkStep();
 		if (!result.ok) {
@@ -551,7 +551,7 @@
 	let lastTap = { id: -1, at: 0 };
 
 	const movable = (t: Tile) =>
-		step !== 'done' && !locked.has(t.id) && !cancelling?.ids.includes(t.id);
+		step !== 'done' && !locked.has(t.id) && !zeroing?.ids.includes(t.id);
 	/** The tiles a student can select: every one they can still move. */
 	const selectable = () => tiles.filter((t) => movable(t) && !vanished(t));
 
@@ -856,14 +856,14 @@
 		}
 	}
 
-	// --- cancelling zero pairs: a rumble, the two slide into each other, and a poof ---
+	// --- zeroing out zero pairs: a rumble, the two slide into each other, and a poof ---
 
 	const pairs = $derived(zeroPairs(tiles.filter((t) => movable(t) && !vanished(t))));
 	const partner = (id: number) => {
 		const pair = pairs.find(([a, b]) => a.id === id || b.id === id);
 		return pair ? (pair[0].id === id ? pair[1] : pair[0]) : null;
 	};
-	let cancelling = $state<{
+	let zeroing = $state<{
 		ids: number[];
 		phase: 'rumble' | 'merge';
 		to: Record<number, { x: number; y: number }>;
@@ -924,10 +924,10 @@
 		];
 	}
 
-	function cancelOut(id: number) {
+	function zeroOut(id: number) {
 		const other = partner(id);
 		const t = tiles.find((t) => t.id === id);
-		if (!other || !t || cancelling) return;
+		if (!other || !t || zeroing) return;
 		const a = rectOf(t);
 		const b = rectOf(other);
 		const mid = {
@@ -940,8 +940,8 @@
 			[other.id]: { x: mid.x - centre(b).x, y: mid.y - centre(b).y }
 		};
 		select([]);
-		cancelling = { ids: [t.id, other.id], phase: 'rumble', to };
-		setTimeout(() => cancelling && (cancelling = { ...cancelling, phase: 'merge' }), RUMBLE_MS);
+		zeroing = { ids: [t.id, other.id], phase: 'rumble', to };
+		setTimeout(() => zeroing && (zeroing = { ...zeroing, phase: 'merge' }), RUMBLE_MS);
 		setTimeout(
 			() => {
 				const w = Math.max(a.w, b.w);
@@ -955,7 +955,7 @@
 			RUMBLE_MS + MERGE_MS - POOF_LEAD_MS
 		);
 		setTimeout(() => {
-			cancelling = null;
+			zeroing = null;
 			change(tiles.filter((o) => o.id !== t.id && o.id !== other.id));
 		}, RUMBLE_MS + MERGE_MS);
 	}
@@ -963,17 +963,17 @@
 	// --- the buttons above the selected tiles ---
 
 	const focus = $derived.by(() => {
-		if (drag?.moved || cancelling || marquee) return null;
+		if (drag?.moved || zeroing || marquee) return null;
 		const chosen = tiles.filter((t) => selected.has(t.id) && movable(t) && !vanished(t));
 		if (!chosen.length) return null;
-		// One tile in a zero pair can cancel out; the buttons then sit above both
+		// One tile in a zero pair can zero out; the buttons then sit above both
 		// tiles, so neither is hidden.
 		const other = chosen.length === 1 ? partner(chosen[0].id) : null;
 		const box = bounds([...chosen, ...(other ? [other] : [])].map(rectOf));
 		return {
 			ids: chosen.map((t) => t.id),
 			canTurn: chosen.some(turnable),
-			cancel: other ? chosen[0].id : null,
+			zero: other ? chosen[0].id : null,
 			x: box.x + box.w / 2,
 			y: box.y
 		};
@@ -1158,7 +1158,7 @@
 			{/each}
 
 			{#each tiles as t (t.id)}
-				{@const moving = cancelling?.ids.includes(t.id) ? cancelling : null}
+				{@const moving = zeroing?.ids.includes(t.id) ? zeroing : null}
 				<button
 					type="button"
 					class="piece"
@@ -1318,14 +1318,14 @@
 			<button type="button" onclick={() => duplicate(focus.ids)} title="Duplicate (Ctrl+D)">
 				<Copy size={15} /> Duplicate
 			</button>
-			{#if focus.cancel !== null}
+			{#if focus.zero !== null}
 				<button
 					type="button"
 					class="zero"
-					onclick={() => cancelOut(focus.cancel!)}
+					onclick={() => zeroOut(focus.zero!)}
 					title="These two make zero"
 				>
-					Cancel out
+					Zero out
 				</button>
 			{/if}
 			<button
@@ -1668,7 +1668,7 @@
 		}
 	}
 
-	/* Cancelling out: the pair rumbles, slides into each other, and poofs. */
+	/* Zeroing out: the pair rumbles, slides into each other, and poofs. */
 	.piece.rumble {
 		animation: rumble 0.12s linear infinite;
 	}

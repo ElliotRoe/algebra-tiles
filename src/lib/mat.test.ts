@@ -118,15 +118,15 @@ describe('Multiply', () => {
 		const poly = [-6, -1, 1];
 		// Still a zero pair among the x tiles.
 		expect(checkGroups([], groups, poly).ok).toBe(false);
-		// Cancel two zero pairs.
+		// Zero out two zero pairs.
 		const pos = groups.x.filter((t) => t.sign === 1);
 		const neg = groups.x.filter((t) => t.sign === -1);
-		const cancelled = { ...groups, x: neg.slice(2) };
+		const zeroed = { ...groups, x: neg.slice(2) };
 		expect(pos.length).toBe(2);
-		expect(checkGroups([], cancelled, poly).ok).toBe(true);
-		expect(checkGroups(tiles.slice(0, 1), cancelled, poly).ok).toBe(false);
+		expect(checkGroups([], zeroed, poly).ok).toBe(true);
+		expect(checkGroups(tiles.slice(0, 1), zeroed, poly).ok).toBe(false);
 		expect(
-			checkGroups([], { ...cancelled, x2: [...cancelled.x2, cancelled.unit[0]] }, poly).ok
+			checkGroups([], { ...zeroed, x2: [...zeroed.x2, zeroed.unit[0]] }, poly).ok
 		).toBe(false);
 	});
 });

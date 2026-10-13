@@ -26,9 +26,9 @@ A tile standing for the opposite of its positive twin, shown in red.
 **Zero pair**:
 A positive tile and a negative tile of the same kind, which together stand for zero.
 
-**Cancel out**:
-To take a zero pair off the board, once its two tiles lie flush against each other.
-_Avoid_: Delete, remove (for a zero pair)
+**Zero out**:
+To take a zero pair off the board, once its two tiles lie flush against each other: the zero principle, a number and its opposite make zero.
+_Avoid_: Cancel out, delete, remove (for a zero pair)
 
 ### The mat
 
@@ -45,7 +45,7 @@ The region inside the T where the product is built, one tile where each row meet
 _Avoid_: Area, product area, box
 
 **Like-term group**:
-A labelled place where the student gathers every tile of one kind from the rectangle and cancels its zero pairs: the x² group, the x group or the unit group.
+A labelled place where the student gathers every tile of one kind from the rectangle and zeroes out its zero pairs: the x² group, the x group or the unit group.
 _Avoid_: Bin, pile, bucket
 
 **Starting tiles**:

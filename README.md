@@ -54,7 +54,7 @@ from the corner: a tile dropped there slides along to the corner or the tile
 before it, and the row closes up when one leaves. Tiles keep whichever way they
 face: double-click one to turn it, except on a side of the T. Click a tile, or
 Shift-click several, or Ctrl/⌘ + A for all of them, for their buttons: Turn,
-Flip (to the opposite sign), Duplicate (Ctrl/⌘ + D), Delete, and **Cancel
+Flip (to the opposite sign), Duplicate (Ctrl/⌘ + D), Delete, and **Zero
 out** when one tile lies flush against its opposite, which rumbles the pair,
 slides them into each other and poofs. Dragging a selected tile moves the whole
 selection. Ctrl/⌘ + C, X and V copy, cut and paste tiles, pasting at the
@@ -66,7 +66,7 @@ and it locks the tiles it read.
 
 - **Multiply**: lay the factors along the two sides of the T → the sides lock
   and grey out; fill the rectangle → the T fades away; sort its tiles into their
-  like-term groups and cancel the zero pairs → type the product after the
+  like-term groups and zero out the zero pairs → type the product after the
   printed `(x+2)(x-3) =`.
 - **Factor**: arrange the tiles into a rectangle in the corner of the T,
   bringing out zero pairs as needed → lay tiles on the sides that measure it →

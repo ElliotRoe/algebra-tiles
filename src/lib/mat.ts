@@ -563,7 +563,7 @@ export function checkGroups(outside: Tile[], groups: Record<Kind, Tile[]>, produ
 	const pairs = GROUP_KINDS.filter((k) => new Set(groups[k].map((t) => t.sign)).size > 1);
 	if (pairs.length)
 		return fail(
-			'There are still zero pairs. Push a negative tile up against a positive one of the same kind, then cancel them out.',
+			'There are still zero pairs. Push a negative tile up against a positive one of the same kind, then zero them out.',
 			pairs.flatMap((k) => groups[k].map((t) => t.id))
 		);
 	return pass();
@@ -618,7 +618,7 @@ export function readSide(tiles: Tile[], which: 'top' | 'left'): Result & { side:
 // --- zero pairs ---
 
 /** Opposite tiles lying flush against each other, a whole edge to a whole
- *  edge, which can cancel out. Each tile is in at most one pair. */
+ *  edge, which can zero out. Each tile is in at most one pair. */
 export function zeroPairs(tiles: Tile[]): [Tile, Tile][] {
 	const out: [Tile, Tile][] = [];
 	const used = new Set<number>();
