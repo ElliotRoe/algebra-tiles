@@ -1,22 +1,34 @@
 <script lang="ts">
 	// The student's view of one problem: a whiteboard with the mat on it. A bar
-	// across the top names the problem and its steps; the step's instructions
-	// and its Check are written on the board under the T, and zoom with it; the
-	// toolbar floats at the bottom, with the zoom beside it.
+	// across the top names the problem, its steps and the step's Check (or, on
+	// the last step, the answer field); what a failed Check found wrong shows
+	// just under it, and the tiles it found are marked in red. The toolbar
+	// floats at the bottom, with the zoom beside it.
 	//
 	// Multiply goes sides → rectangle → like-term groups → equation; Factor goes
-	// rectangle → sides → equation. Each step ends with Check, which marks what's
-	// wrong in red, and only a passed Check opens the next step. A passed Check
-	// locks the tiles it read; once Multiply's rectangle passes, the T fades away
-	// and its tiles are sorted into groups. The board shows no messages but a
-	// failed Check's.
+	// rectangle → sides → equation. Only a passed Check opens the next step, and
+	// it locks the tiles it read; once Multiply's rectangle passes, the T fades
+	// away and its tiles are sorted into groups.
 	//
 	// Tiles behave the same everywhere and can go anywhere: they snap to the
-	// edges near them (a side of the T holds a single row), keep whichever way
-	// they face until the student turns them, and a tile pushed flush against
-	// its opposite can zero out with it. A side of the T holds one row, laid
-	// end to end from the corner, so a tile dropped there slides into place; a
-	// tile there can't be turned.
+	// edges near them, keep whichever way they face until the student turns
+	// them, and zero out with their opposites. A side of the T holds one row,
+	// laid end to end from the corner, so a tile dropped there slides into
+	// place; a tile there can't be turned. Copies (Duplicate, paste,
+	// Alt-drag) keep their originals' places: pasted and duplicated tiles go
+	// directly below what was copied, in the same pan.
+	//
+	// Solve has a balance in place of the T, its two pans one for each side of
+	// the equation, and goes same to both pans → division step → answer. The
+	// live balance tips as tiles go in and out of the pans (see
+	// docs/adr/0005-the-balance-weighs-the-pans.md). With the live balance off
+	// there's no balance: the equation's two sides lie either side of a line,
+	// nothing tips, and only Check says whether they're equal. A pan's tiles are drawn as far down as it hangs, but kept on the
+	// board where the pan would be level, so where a tile lies, and so every
+	// check, ignores the tipping. Once step 1 passes, the balance fades to a
+	// line standing for =, with a box across it for each x tile; the student
+	// shares the units out among the boxes. Once that passes, all boxes but the
+	// first fade away. With one x tile, there's no division step.
 	import { onMount, tick } from 'svelte';
 	import {
 		Check,
@@ -28,19 +40,41 @@
 		MousePointer2,
 		Plus,
 		Redo2,
+		RotateCcw,
 		RotateCw,
 		Trash2,
 		Undo2
 	} from '@lucide/svelte';
 	import {
 		checkEquation,
+		checkSolution,
 		factorizations,
 		formatFactor,
+		formatPoly,
 		prettyText,
-		type ActivityType,
+		type Built,
+		type Equation,
 		type Factor,
 		type Problem
 	} from './algebra';
+	import {
+		BOX_PAD,
+		PAN_PAD,
+		balanceFor,
+		boxHalf,
+		boxIn,
+		checkBoxes,
+		checkPans,
+		divisionFor,
+		heapSpot,
+		lean,
+		panDrops,
+		tiltOf,
+		withHeight,
+		type Division,
+		type Lean,
+		type Pan
+	} from './balance';
 	import {
 		GAP,
 		lenAdd,
@@ -54,13 +88,16 @@
 		checkSides,
 		checkSidesAgainst,
 		lenPx,
+		net,
 		packSides,
+		pairUp,
 		readRectangle,
 		readSide,
 		rectOf,
 		rowOf,
 		settle,
 		size,
+		stackBelow,
 		zeroPairs,
 		type Cell,
 		type Grid,
@@ -74,21 +111,42 @@
 	} from './mat';
 	import MathInput from './MathInput.svelte';
 	import TileView from './TileView.svelte';
-	import { rectangleTiles, startingPiles, type Start } from './settings';
+	import BalanceArt from './BalanceArt.svelte';
+	import { layPiles, panPiles, rectangleTiles, startingPiles, type Start } from './settings';
 
-	let { problem, start = 'all' }: { problem: Extract<Problem, { ok: true }>; start?: Start } =
-		$props();
+	let {
+		problem,
+		start = 'all',
+		live = true
+	}: {
+		problem: Extract<Problem, { ok: true }>;
+		start?: Start;
+		/** Solve: whether the balance tips as the student works, or always hangs level. */
+		live?: boolean;
+	} = $props();
 
 	// The problem never changes for the life of this view; the page makes a new one per link.
 	// svelte-ignore state_referenced_locally
 	const p = problem;
+	// Solve always starts with all its tiles in place: it has no choice of start.
 	// svelte-ignore state_referenced_locally
-	const startWith = start;
+	const startWith: Start = problem.type === 'solve' ? 'all' : start;
+	// svelte-ignore state_referenced_locally
+	const liveBalance = live;
+	/** Multiply or Factor, built on the T; or Solve, on the balance. */
+	const built: Built | null = p.type === 'solve' ? null : p;
+	const eq: Equation | null = p.type === 'solve' ? p : null;
+	const solving = eq !== null;
+	/** Solve: the balance as it starts, with its pans sized for the problem. */
+	const firstBal = eq && balanceFor(eq);
+	/** Solve: the balance, whose pans grow taller when copies go below their tiles. */
+	let bal = $state(firstBal);
 
 	// --- steps ---
 
-	type Step = 'sides' | 'rectangle' | 'groups' | 'equation' | 'done';
-	const STEPS: Record<ActivityType, Step[]> = {
+	type Step =
+		'sides' | 'rectangle' | 'groups' | 'equation' | 'balance' | 'divide' | 'answer' | 'done';
+	const STEPS: Record<Built['type'], Step[]> = {
 		multiply: ['sides', 'rectangle', 'groups', 'equation'],
 		factor: ['rectangle', 'sides', 'equation']
 	};
@@ -97,48 +155,34 @@
 		rectangle: 'Rectangle',
 		groups: 'Like terms',
 		equation: 'Equation',
+		// Solve's step 1, doing the same to both pans until x is alone.
+		balance: 'Isolate',
+		divide: 'Divide',
+		answer: 'Answer',
 		done: 'Done'
 	};
-	const steps = STEPS[p.type];
+	// Solve skips the division step when one x tile is left.
+	const steps: Step[] = built
+		? STEPS[built.type]
+		: firstBal!.rows > 1
+			? ['balance', 'divide', 'answer']
+			: ['balance', 'answer'];
 	let step = $state<Step>(steps[0]);
 	/** Multiply's T fades away once its rectangle is done, leaving the tiles to sort. */
 	const faded = $derived(
 		p.type === 'multiply' && (step === 'groups' || step === 'equation' || step === 'done')
 	);
 
-	const instructions = (s: Step): string => {
-		const [f, g] = p.factors;
-		return {
-			sides:
-				p.type === 'multiply'
-					? `Build ${formatFactor(f)} along one side of the T and ${formatFactor(g)} along the other.`
-					: 'Lay tiles along both sides of the T to measure your rectangle.',
-			rectangle:
-				p.type === 'multiply'
-					? 'Fill in the rectangle. Each tile fits its row and column, and takes their signs multiplied.'
-					: 'Make a rectangle in the corner of the T. Add zero pairs if you need them.',
-			groups: 'Sort the tiles into their groups, and zero out the zero pairs.',
-			equation:
-				p.type === 'multiply'
-					? 'Write the product with like terms combined.'
-					: 'Write the polynomial as its factors.',
-			done: ''
-		}[s];
-	};
-
 	// --- the mat's size: long enough for the longest side any answer needs ---
 
 	const sideLength = (f: Factor) => Math.abs(f.x) * XLEN + Math.abs(f.unit) * UNIT;
-	const allSides = [...p.factors, ...factorizations(p.poly).flat()];
+	const allSides = built ? [...built.factors, ...factorizations(built.poly).flat()] : [];
 	const ARM = Math.max(Math.max(...allSides.map(sideLength)) + 2 * XLEN, 4 * XLEN);
 	const STRIP = UNIT + 2 * GAP;
 	const region: Rect = { x: 0, y: 0, w: ARM, h: ARM };
 	const topStrip: Rect = { x: 0, y: -STRIP, w: ARM, h: STRIP };
 	const leftStrip: Rect = { x: -STRIP, y: 0, w: STRIP, h: ARM };
-	/** Where the instructions are written, under the T. */
-	const ROW: Rect = { x: -STRIP, y: ARM + UNIT * 0.75, w: ARM + STRIP, h: UNIT * 4 };
-
-	const rectTiles = rectangleTiles(p);
+	const rectTiles = built ? rectangleTiles(built) : [];
 
 	// The like-term groups, beside the rectangle, each big enough for its tiles.
 	const ZONE_W = 4.5 * XLEN;
@@ -172,38 +216,77 @@
 	/** Multiply: the rectangle's tiles, which all have to end up in a group. */
 	let product = new Set<number>();
 
-	/** The tiles the teacher chose to start with, lying beside the mat, one row
-	 *  per kind and sign. */
+	/** The tiles the teacher chose to start with, lying beside the mat, or in
+	 *  their pans in Solve, one row per kind and sign. */
 	function startingTiles(): Tile[] {
-		const out: Tile[] = [];
-		let y = 0;
-		for (const { kind, sign, n } of startingPiles(p, startWith)) {
-			const { w, h } = size(kind);
-			const perRow = Math.max(1, Math.floor((5 * XLEN) / (lenPx(w) + GAP)));
-			for (let i = 0; i < n; i++) {
-				out.push({
-					id: nextId++,
-					kind,
-					sign,
-					turned: false,
-					x: ARM + 1.5 * XLEN + (i % perRow) * (lenPx(w) + GAP),
-					y: y + Math.floor(i / perRow) * (lenPx(h) + GAP),
-					at: { x: null, y: null }
-				});
-			}
-			y += Math.ceil(n / perRow) * (lenPx(h) + GAP) + UNIT;
-		}
-		return out;
+		const id = () => nextId++;
+		if (!firstBal)
+			return layPiles(startingPiles(built!, startWith), ARM + 1.5 * XLEN, 0, 5 * XLEN, id);
+		const [l, r] = panPiles(eq!, startWith);
+		const inPan = (pan: Rect) => [pan.x + PAN_PAD, pan.y + PAN_PAD, pan.w - 2 * PAN_PAD] as const;
+		return [
+			...layPiles(l, ...inPan(firstBal.left), id),
+			...layPiles(r, ...inPan(firstBal.right), id)
+		];
 	}
 
-	const centre = (r: Rect) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
+	const center = (r: Rect) => ({ x: r.x + r.w / 2, y: r.y + r.h / 2 });
 	const inside = (pt: { x: number; y: number }, r: Rect) =>
 		pt.x >= r.x && pt.x <= r.x + r.w && pt.y >= r.y && pt.y <= r.y + r.h;
-	const within = (t: Tile | Rect, r: Rect) => inside(centre('kind' in t ? rectOf(t) : t), r);
+	const within = (t: Tile | Rect, r: Rect) => inside(center('kind' in t ? rectOf(t) : t), r);
 	const zoneOf = (t: Tile): Kind | null =>
 		faded ? (GROUP_KINDS.find((k) => within(t, zones[k])) ?? null) : null;
-	/** Whether a tile is gone from the board with the faded T. */
-	const vanished = (t: Tile) => faded && sideIds.has(t.id);
+	/** Solve: the x tiles' pan, once step 1 has passed, and the units' pan. */
+	let xPan = $state<Pan>('left');
+	const unitPan = $derived<Pan>(xPan === 'left' ? 'right' : 'left');
+	/** Solve: the tiles that faded away with every row but the first. */
+	let fadedIds = $state(new Set<number>());
+	/** Solve: the division step's line and boxes, once step 1 has passed. */
+	let division = $state<Division | null>(null);
+	/** Solve: how many unit tiles there were to share out when step 1 passed. */
+	let unitCount = 0;
+	/** Solve: the uneven boxes the division step's Check found. */
+	let badBoxes = $state<number[]>([]);
+	/** Tiles sliding into place on their own, as the x tiles line up after step 1. */
+	let gliding = $state(false);
+
+	/** Whether a tile is gone from the board with the faded T, or a faded row. */
+	const vanished = (t: Tile) => (faded && sideIds.has(t.id)) || fadedIds.has(t.id);
+
+	// --- the balance ---
+
+	/** Which pan a tile lies in, if any, by where its middle is. */
+	const panOf = (t: Tile): Pan | null =>
+		bal ? (within(t, bal.left) ? 'left' : within(t, bal.right) ? 'right' : null) : null;
+	const inPan = (which: Pan) => tiles.filter((t) => !vanished(t) && panOf(t) === which);
+	/** Which way the balance hangs: live through step 1, unless the teacher
+	 *  turned the live balance off, and level after. */
+	const leaning = $derived.by((): Lean => {
+		if (!eq || !liveBalance || step !== 'balance') return { toward: null };
+		return lean(net(inPan('left')), net(inPan('right')), eq);
+	});
+	const tilt = $derived(tiltOf(leaning));
+	/** How far each pan hangs down from level, in board pixels. */
+	const drops = $derived(bal ? panDrops(bal, tilt) : { left: 0, right: 0 });
+	/** How far down a rect on the board is drawn: as far as the pan it's in hangs. */
+	const offset = (r: Rect): number => {
+		if (!bal) return 0;
+		const c = center(r);
+		return inside(c, bal.left) ? drops.left : inside(c, bal.right) ? drops.right : 0;
+	};
+	const lifted = (r: Rect): Rect => ({ ...r, y: r.y + offset(r) });
+	/** Where a tile drawn with its corner at (x, y) lies on the board: in a pan
+	 *  that hangs down, that far up. Returns the board y. */
+	function unlift(kind: Kind, turned: boolean, x: number, y: number): number {
+		if (!bal) return y;
+		const { w, h } = size(kind, turned);
+		const c = { x: x + lenPx(w) / 2, y: y + lenPx(h) / 2 };
+		for (const which of ['left', 'right'] as Pan[]) {
+			const r = bal[which];
+			if (inside(c, { ...r, y: r.y + drops[which] })) return y - drops[which];
+		}
+		return y;
+	}
 
 	// --- undo and redo ---
 
@@ -218,7 +301,8 @@
 	}
 	/** Close up the rows on the T's sides, keeping locked tiles in front. Once
 	 *  the T has faded, its sides are gone. */
-	const arrange = (next: Tile[]) => (faded ? next : packSides(next, ARM, (t) => locked.has(t.id)));
+	const arrange = (next: Tile[]) =>
+		faded || solving ? next : packSides(next, ARM, (t) => locked.has(t.id));
 	function undo() {
 		if (!past.length || zeroing) return;
 		future = [...future, tiles];
@@ -248,6 +332,7 @@
 	function clearMarks() {
 		wrong = new Set();
 		gaps = [];
+		badBoxes = [];
 	}
 	function forget(id: number) {
 		if (wrong.has(id)) wrong = new Set([...wrong].filter((w) => w !== id));
@@ -256,6 +341,18 @@
 	// --- checking ---
 
 	let answer = $state('');
+	/** The last step, where the answer field takes the steps' place in the bar. */
+	const answering = $derived(step === 'answer' || step === 'equation');
+	/** What the student found, as the bar shows it beside the problem once
+	 *  they're done: always the same text, so the bar keeps its size whatever
+	 *  was typed. */
+	const solved = (() => {
+		if (eq) return `x = ${prettyText(String(eq.solution))}`;
+		const b = built!;
+		if (b.type === 'multiply') return `= ${formatPoly(b.poly)}`;
+		const paren = (f: Factor) => (f.x && f.unit ? `(${formatFactor(f)})` : formatFactor(f));
+		return `= ${b.factors.map(paren).join('')}`;
+	})();
 
 	function checkSidesStep(): Result {
 		const onTop = tiles.filter((t) => within(t, topStrip));
@@ -267,8 +364,8 @@
 		const rl = readSide(onLeft, 'left');
 		if (!rl.ok) return rl;
 		const r =
-			p.type === 'multiply'
-				? checkSides(rt.side, rl.side, p.factors)
+			built!.type === 'multiply'
+				? checkSides(rt.side, rl.side, built!.factors)
 				: checkSidesAgainst(rt.side, rl.side, grid!);
 		if (r.ok) {
 			top = rt.side;
@@ -280,16 +377,38 @@
 		return r;
 	}
 
-	function checkStep(): Result & { note?: string } {
+	/** Solve, step 1: the pans have to be level, x tiles in one, units in the other. */
+	function checkPansStep(): Result {
+		const r = checkPans(inPan('left'), inPan('right'), eq!, liveBalance);
+		if (r.ok) xPan = r.xPan!;
+		return r;
+	}
+
+	/** Solve, the division step: the units shared evenly among the boxes. Every
+	 *  tile the student can still move counts: the x tiles are locked in their boxes. */
+	function checkDivideStep(): Result & { badBoxes?: number[] } {
+		const d = division!;
+		const units = tiles.filter((t) => movable(t) && !vanished(t));
+		return checkBoxes(units, (t) => boxIn(d, t), d.boxes.length, unitCount);
+	}
+
+	function checkStep(): Result & { note?: string; badBoxes?: number[] } {
 		const onMat = tiles.filter((t) => within(t, region));
+		const none = { wrong: [], gaps: [] };
+		if (step === 'balance') return checkPansStep();
+		if (step === 'divide') return checkDivideStep();
+		if (step === 'answer') {
+			const v = checkSolution(eq!, answer);
+			return v.ok ? { ok: true, message: '', ...none } : { ok: false, message: v.message, ...none };
+		}
 		if (step === 'sides') return checkSidesStep();
 		if (step === 'rectangle') {
-			if (p.type === 'multiply') {
+			if (built!.type === 'multiply') {
 				const r = checkProduct(onMat, top, left);
 				if (r.ok) product = new Set(onMat.map((t) => t.id));
 				return r;
 			}
-			const r = readRectangle(onMat, p.poly);
+			const r = readRectangle(onMat, built!.poly);
 			if (r.ok) {
 				grid = r.grid!;
 				locked = new Set([...locked, ...onMat.map((t) => t.id)]);
@@ -301,12 +420,11 @@
 				GROUP_KINDS.map((k) => [k, tiles.filter((t) => zoneOf(t) === k)])
 			) as Record<Kind, Tile[]>;
 			const outside = tiles.filter((t) => product.has(t.id) && !zoneOf(t));
-			return checkGroups(outside, groups, p.poly);
+			return checkGroups(outside, groups, built!.poly);
 		}
-		const none = { wrong: [], gaps: [] };
 		if (answer.includes('='))
 			return { ok: false, message: 'Type just the other side. The = is already there.', ...none };
-		const v = checkEquation(p, `${p.given}=${answer}`);
+		const v = checkEquation(built!, `${p.given}=${answer}`);
 		return v.ok
 			? { ok: true, message: '', note: v.note, ...none }
 			: { ok: false, message: v.message, ...none };
@@ -319,26 +437,99 @@
 		if (!result.ok) {
 			wrong = new Set(result.wrong);
 			gaps = result.gaps;
+			badBoxes = result.badBoxes ?? [];
 			error = result.message;
 			return;
 		}
 		error = '';
 		if (result.note) note = result.note;
+		const was = step;
 		const next = steps[steps.indexOf(step) + 1] ?? 'done';
 		step = next;
 		past = [];
 		future = [];
 		select([]);
-		if (next === 'groups') {
+		if (was === 'balance') lineUp();
+		if (was === 'divide') fadeBoxes();
+		if (next === 'groups' || was === 'balance' || was === 'divide') {
 			await tick();
-			fit();
+			fit(650);
 		}
+		// The answer field takes the steps' place in the bar, ready to type in.
+		if (next === 'answer' || next === 'equation') {
+			await tick();
+			headerEl?.querySelector<HTMLElement>('.equation [aria-label]')?.focus();
+		}
+	}
+
+	/** Solve, after step 1: the balance fades, leaving its post as a line for =,
+	 *  and a box across the line for each x tile, stacked down and as tall as
+	 *  the screen allows. Each x tile slides into its own box, lying across, on
+	 *  its own side of the line, locked; the units wait in a heap above the
+	 *  boxes on theirs. With one x tile, its units go straight into its box.
+	 *  Tiles off the balance fade away: they never counted. */
+	function lineUp() {
+		const b = bal!;
+		const order = (a: Tile, c: Tile) => a.y - c.y || a.x - c.x;
+		const xs = inPan(xPan).sort(order);
+		const units = inPan(unitPan).sort(order);
+		const off = tiles.filter((t) => !vanished(t) && !panOf(t));
+		const aspect = boardH && boardW ? viewH() / viewW() : 0.6;
+		const d = divisionFor(b.pivot.x, b.left.y, b.rows, units.length, xPan, aspect);
+		division = d;
+		unitCount = units.length;
+		const none = { x: null, y: null };
+		// Read only here, so it needn't be reactive.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
+		const moved = new Map<number, Tile>();
+		xs.forEach((t, i) => {
+			const half = boxHalf(d, i, false);
+			const x = half.x + (half.w - XLEN) / 2;
+			moved.set(t.id, { ...t, turned: false, x, y: half.y + (half.h - UNIT) / 2, at: none });
+			if (t.turned) animate(t.id, 'up');
+		});
+		units.forEach((t, i) => {
+			if (d.boxes.length === 1) {
+				const half = boxHalf(d, 0, true);
+				const across = Math.max(1, Math.floor((half.w - 2 * BOX_PAD) / UNIT));
+				const rows = Math.ceil(units.length / across);
+				const y0 = half.y + (half.h - rows * UNIT) / 2;
+				moved.set(t.id, {
+					...t,
+					x: half.x + BOX_PAD + (i % across) * UNIT,
+					y: y0 + Math.floor(i / across) * UNIT,
+					at: none
+				});
+			} else moved.set(t.id, { ...t, ...heapSpot(d, i), at: none });
+		});
+		gliding = !still();
+		setTimeout(() => (gliding = false), 650);
+		tiles = tiles.map((t) => moved.get(t.id) ?? t);
+		fadedIds = new Set([...fadedIds, ...off.map((t) => t.id)]);
+		const lock = d.boxes.length === 1 ? [...xs, ...units] : xs;
+		locked = new Set([...locked, ...lock.map((t) => t.id)]);
+	}
+
+	/** Solve, after the division step: every box but the first fades away with
+	 *  its tiles, leaving one x tile and its share of the units. */
+	function fadeBoxes() {
+		const d = division!;
+		const inBox = (t: Tile) => {
+			const r = rectOf(t);
+			const c = { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+			return d.boxes.findIndex((b) => inside(c, b));
+		};
+		const live = tiles.filter((t) => !vanished(t));
+		fadedIds = new Set([...fadedIds, ...live.filter((t) => inBox(t) > 0).map((t) => t.id)]);
+		locked = new Set([...locked, ...live.map((t) => t.id)]);
 	}
 
 	// --- the view: pan and zoom ---
 
 	let boardEl = $state<HTMLDivElement>();
 	let toolbarEl = $state<HTMLDivElement>();
+	/** How tall the toolbar is: two rows on a phone, so the zoom sits above it. */
+	let toolbarH = $state(0);
 	let trashEl = $state<HTMLButtonElement>();
 	let headerEl = $state<HTMLElement>();
 	let boardW = $state(0);
@@ -354,7 +545,40 @@
 	/** A board point in pixels from the board's top-left corner on screen. */
 	const toScreen = (x: number, y: number) => ({ x: panX + x * zoom, y: panY + y * zoom });
 
+	/** Whether the student's system asks for less motion: animations then jump. */
+	const still = () =>
+		typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+	/** The camera move under way, if any, so a new move or a wheel can stop it. */
+	let camera = 0;
+	/** Move the view to a zoom and pan, eased over `ms`, or at once. Pan and zoom
+	 *  move together, through the point on the board that's fixed between them,
+	 *  so it's plainly the same board re-framed. */
+	function moveView(z: number, x: number, y: number, ms = 0) {
+		cancelAnimationFrame(camera);
+		if (!ms || still()) {
+			zoom = z;
+			panX = x;
+			panY = y;
+			return;
+		}
+		const from = { z: zoom, x: panX, y: panY };
+		const t0 = performance.now();
+		const ease = (t: number) => (t < 0.5 ? 4 * t * t * t : 1 - (-2 * t + 2) ** 3 / 2);
+		const frame = (now: number) => {
+			const t = Math.min(1, (now - t0) / ms);
+			const e = ease(t);
+			// Zoom eases on a log scale, so zooming in and out feel the same.
+			zoom = from.z * (z / from.z) ** e;
+			panX = from.x + (x - from.x) * e;
+			panY = from.y + (y - from.y) * e;
+			if (t < 1) camera = requestAnimationFrame(frame);
+		};
+		camera = requestAnimationFrame(frame);
+	}
+
 	function zoomAt(factor: number, cx: number, cy: number) {
+		cancelAnimationFrame(camera);
 		const r = boardEl!.getBoundingClientRect();
 		const next = Math.min(4, Math.max(0.05, zoom * factor));
 		const k = next / zoom;
@@ -362,43 +586,80 @@
 		panY = cy - r.top - (cy - r.top - panY) * k;
 		zoom = next;
 	}
+	/** The zoom buttons: about the middle of the view, eased. */
 	function zoomBy(factor: number) {
-		const r = boardEl!.getBoundingClientRect();
-		zoomAt(factor, r.left + boardW / 2, r.top + boardH / 2);
+		const next = Math.min(4, Math.max(0.05, zoom * factor));
+		const k = next / zoom;
+		moveView(next, boardW / 2 - (boardW / 2 - panX) * k, boardH / 2 - (boardH / 2 - panY) * k, 250);
 	}
 
-	/** Zoom to show the whole mat, every tile and the instructions, clear of the bars. */
-	function fit() {
+	/** The room on screen for the board's drawing, clear of the bars. */
+	const marginT = () => (headerEl?.offsetHeight ?? 0) + 40;
+	const marginB = () => (toolbarEl?.offsetHeight ?? 0) + 48;
+	const viewW = () => Math.max(100, boardW - 48);
+	const viewH = () => Math.max(100, boardH - marginT() - marginB());
+
+	/** What the view has to show: the mat or the balance, or the division
+	 *  step's line and boxes, and every tile. */
+	function drawingRects(): Rect[] {
+		const shown = tiles.filter((t) => !vanished(t)).map(rectOf);
+		if (division && step !== 'balance') {
+			const d = division;
+			return [
+				...(step === 'divide'
+					? [{ x: d.line.x - d.half, y: d.line.top, w: 2 * d.half, h: d.line.bottom - d.line.top }]
+					: []),
+				...d.boxes.filter((_, i) => i === 0 || step === 'divide'),
+				...shown
+			];
+		}
+		if (bal && !liveBalance) return [bal.left, bal.right, ...shown];
+		if (bal)
+			return [
+				{
+					x: bal.left.x - 20,
+					y: bal.pivot.y - 64,
+					w: bal.right.x + bal.right.w - bal.left.x + 40,
+					h: bal.foot + 24 - (bal.pivot.y - 64)
+				},
+				...shown
+			];
+		return [
+			{ x: -STRIP, y: -STRIP, w: ARM + STRIP, h: ARM + STRIP },
+			...shown,
+			...(faded ? GROUP_KINDS.map((k) => zones[k]) : [])
+		];
+	}
+
+	/** Zoom to show everything that matters, filling the room clear of the bars:
+	 *  at once as the page opens, eased (`ms`) when a step re-frames the board. */
+	function fit(ms = 0) {
 		if (!boardEl) return;
 		// Read the size directly: on the first fit, the bound size isn't in yet.
 		boardW = boardEl.clientWidth;
 		boardH = boardEl.clientHeight;
-		const rects = [
-			{ x: -STRIP, y: -STRIP, w: ARM + STRIP, h: ARM + STRIP },
-			ROW,
-			...tiles.filter((t) => !vanished(t)).map(rectOf),
-			...(faded ? GROUP_KINDS.map((k) => zones[k]) : [])
-		];
-		const x0 = Math.min(...rects.map((r) => r.x));
-		const y0 = Math.min(...rects.map((r) => r.y));
-		const x1 = Math.max(...rects.map((r) => r.x + r.w));
-		const y1 = Math.max(...rects.map((r) => r.y + r.h));
-		const marginT = (headerEl?.offsetHeight ?? 0) + 32;
-		const marginB = (toolbarEl?.offsetHeight ?? 0) + 48;
-		const w = Math.max(100, boardW - 48);
-		const h = Math.max(100, boardH - marginT - marginB);
-		zoom = Math.min(1.5, w / (x1 - x0), h / (y1 - y0));
-		panX = 24 + (w - (x1 - x0) * zoom) / 2 - x0 * zoom;
-		panY = marginT + (h - (y1 - y0) * zoom) / 2 - y0 * zoom;
+		const box = bounds(drawingRects());
+		const w = viewW();
+		const h = viewH();
+		const z = Math.min(division && step !== 'balance' ? 3 : 1.5, w / box.w, h / box.h);
+		moveView(
+			z,
+			24 + (w - box.w * z) / 2 - box.x * z,
+			marginT() + (h - box.h * z) / 2 - box.y * z,
+			ms
+		);
 	}
 
 	onMount(() => {
 		// After the first layout, once the bars have their sizes.
-		requestAnimationFrame(fit);
+		requestAnimationFrame(() => {
+			fit();
+		});
 		// Wheel and trackpad: scrolling pans, and pinching (which browsers send as
 		// ctrl + wheel) or ctrl/⌘ + scroll zooms around the pointer.
 		const wheel = (e: WheelEvent) => {
 			e.preventDefault();
+			cancelAnimationFrame(camera);
 			if (e.ctrlKey || e.metaKey) zoomAt(Math.exp(-e.deltaY * 0.01), e.clientX, e.clientY);
 			else {
 				panX -= e.deltaX;
@@ -436,6 +697,7 @@
 	let panMoved = false;
 
 	function boardDown(e: PointerEvent) {
+		cancelAnimationFrame(camera);
 		boardEl!.setPointerCapture(e.pointerId);
 		pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
 		panMoved = false;
@@ -486,7 +748,7 @@
 		if (box && panMoved) {
 			const r = boxRect(box);
 			const caught = selectable().filter((t) => {
-				const o = rectOf(t);
+				const o = lifted(rectOf(t));
 				return o.x < r.x + r.w && r.x < o.x + o.w && o.y < r.y + r.h && r.y < o.y + o.h;
 			});
 			select([...(box.add ? selected : []), ...caught.map((t) => t.id)]);
@@ -533,6 +795,8 @@
 		dy: number;
 		/** The other selected tiles, which move with it. */
 		group: number[];
+		/** Alt/Option is held: copies go where it's let go, and the tiles stay put. */
+		copy?: boolean;
 	}
 	let drag = $state<
 		| (Held & {
@@ -550,8 +814,7 @@
 	/** The last tap on a board tile, to tell a double tap. */
 	let lastTap = { id: -1, at: 0 };
 
-	const movable = (t: Tile) =>
-		step !== 'done' && !locked.has(t.id) && !zeroing?.ids.includes(t.id);
+	const movable = (t: Tile) => step !== 'done' && !locked.has(t.id) && !zeroing?.ids.includes(t.id);
 	/** The tiles a student can select: every one they can still move. */
 	const selectable = () => tiles.filter((t) => movable(t) && !vanished(t));
 
@@ -575,7 +838,8 @@
 			cx: e.clientX,
 			cy: e.clientY,
 			moved: false,
-			shift: e.shiftKey
+			shift: e.shiftKey,
+			copy: e.altKey
 		};
 	}
 
@@ -583,6 +847,7 @@
 		if (!drag) return;
 		drag.cx = e.clientX;
 		drag.cy = e.clientY;
+		drag.copy = e.altKey;
 		if (!drag.moved && Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 4) {
 			drag.moved = true;
 			if (!drag.group.length) select([]);
@@ -591,7 +856,7 @@
 
 	function dragUp(e: PointerEvent) {
 		if (!drag) return;
-		const held = drag;
+		const held = { ...drag, copy: e.altKey };
 		drag = null;
 		if (held.moved) place(held, e.clientX, e.clientY);
 		else tap(held, held.shift);
@@ -628,14 +893,18 @@
 
 	/** On a side of the T, a tile lies in the side's single row: its inner edge
 	 *  against the side's line. Elsewhere it's free on both axes. */
-	function pinFor(kind: Kind, turned: boolean, x: number, y: number) {
-		if (faded) return {};
+	function pinFor(kind: Kind, turned: boolean, x: number, y: number): { x?: number; y?: number } {
 		const { w, h } = size(kind, turned);
 		const landing = { x, y, w: lenPx(w), h: lenPx(h) };
+		if (solving || faded) return {};
 		if (within(landing, topStrip)) return { y: -GAP - lenPx(h) };
 		if (within(landing, leftStrip)) return { x: -GAP - lenPx(w) };
 		return {};
 	}
+
+	/** The T's sides for snapping to, or none in Solve, which has no T. */
+	const sides = (): [SideTile[] | null, SideTile[] | null] =>
+		solving ? [null, null] : [top, left];
 
 	/** The board with a tile set down at (x, y): on a side of the T it joins the
 	 *  side's row, and anywhere else it snaps to the edges near it. Not yet
@@ -648,24 +917,35 @@
 	): Tile[] {
 		const pin = pinFor(t.kind, t.turned, x, y);
 		const others = base.filter((o) => o.id !== t.id && !vanished(o));
+		// In a row of the division step, the tile still snaps along the row to its neighbors.
 		const at =
-			pin.x !== undefined || pin.y !== undefined
+			pin.x !== undefined || (pin.y !== undefined && !solving)
 				? { x: pin.x ?? x, y: pin.y ?? y, at: { x: null, y: null } }
-				: settle(t, x, y, others, top, left, SNAP_REACH / zoom);
+				: settle(t, x, y, others, ...sides(), SNAP_REACH / zoom, pin);
 		return [...base.filter((o) => o.id !== t.id), { ...t, ...at }];
 	}
 
 	/** The board with a held tile let go where the pointer is. The tile snaps,
-	 *  and the rest of the selection keeps its place around it, moving as far. */
+	 *  and the rest of the selection keeps its place around it, moving as far.
+	 *  Copying (Alt-drag), the tiles held stay where they were and copies,
+	 *  with new ids, are added where they're let go. */
 	function drop(held: Held, cx: number, cy: number, id: number): Tile[] {
 		const pt = toBoard(cx, cy);
 		const { kind, sign, turned } = held;
+		const copying = !!held.copy && held.source.from === 'board';
+		const src = held.source.from === 'board' ? held.source.id : id;
 		const group = new Set(held.group);
-		const base = tiles.filter((t) => !group.has(t.id));
-		const next = land({ id, kind, sign, turned }, pt.x - held.dx, pt.y - held.dy, base);
-		if (!group.size) return next;
-		const was = tiles.find((t) => t.id === id)!;
-		const now = next.find((t) => t.id === id)!;
+		const base = copying ? tiles : tiles.filter((t) => !group.has(t.id));
+		const x = pt.x - held.dx;
+		const copyId = copying ? nextId + 1000 : id;
+		const next = land(
+			{ id: copyId, kind, sign, turned },
+			x,
+			unlift(kind, turned, x, pt.y - held.dy),
+			base
+		);
+		const now = next.find((t) => t.id === copyId)!;
+		const was = tiles.find((t) => t.id === src) ?? now;
 		const shift = (a: Len | null, b: Len | null, o: Len | null) =>
 			a && b && o ? lenAdd(o, lenSub(b, a)) : null;
 		const moved = tiles
@@ -676,14 +956,27 @@
 				y: t.y + now.y - was.y,
 				at: { x: shift(was.at.x, now.at.x, t.at.x), y: shift(was.at.y, now.at.y, t.at.y) }
 			}));
-		return [...next, ...moved];
+		if (!copying) return [...next, ...moved];
+		const copies = [now, ...moved].map((t, i) => ({ ...t, id: i ? nextId + 1000 + i : copyId }));
+		return [...tiles, ...copies];
 	}
 
 	/** Put a held tile down where the pointer is. A tile can go anywhere. */
 	function place(held: Held, cx: number, cy: number) {
 		picked = null;
+		const copying = !!held.copy && held.source.from === 'board';
 		if (hit(trashEl, cx, cy) || hit(toolbarEl, cx, cy)) {
-			if (held.source.from === 'board') remove([held.source.id, ...held.group]);
+			if (held.source.from === 'board' && !copying) remove([held.source.id, ...held.group]);
+			return;
+		}
+		if (copying) {
+			// Number the copies for real, in order, now that they're kept.
+			const before = new Set(tiles.map((t) => t.id));
+			const made = drop(held, cx, cy, -1)
+				.filter((t) => !before.has(t.id))
+				.map((t) => ({ ...t, id: nextId++ }));
+			change([...tiles, ...made]);
+			select(made.map((t) => t.id));
 			return;
 		}
 		const id = held.source.from === 'board' ? held.source.id : nextId++;
@@ -694,30 +987,87 @@
 		select(held.group.length ? [id, ...held.group] : []);
 	}
 
-	/** Copies of tiles, set down just after them. One tile's copy goes further
-	 *  along its side's row, or beside it; a selection's copies go beside it,
-	 *  laid out the same. The copies are selected, so the next Duplicate copies on. */
+	/** A tile as copied: what it is, where it lay, and which pan it was in. */
+	type Copied = Pick<Tile, 'kind' | 'sign' | 'turned' | 'x' | 'y' | 'at'> & { pan: Pan | null };
+	const copied = (t: Tile): Copied => ({
+		kind: t.kind,
+		sign: t.sign,
+		turned: t.turned,
+		x: t.x,
+		y: t.y,
+		at: t.at,
+		pan: bal && step === 'balance' ? panOf(t) : null
+	});
+
+	/** Copies of a block of tiles, laid out the same, directly below it and
+	 *  flush, or further down past anything in the way. Each copy stays in its
+	 *  original's pan, which grows taller to fit; a copy from off the balance
+	 *  stays off it. Copies lined up with the mat know where they lie on it. */
+	function below(block: Copied[]): Tile[] {
+		const rects = block.map(rectOf);
+		const others = tiles.filter((t) => !vanished(t)).map(rectOf);
+		const pans = bal && step === 'balance' ? [bal.left, bal.right] : [];
+		const dy = stackBelow(rects, (i) => (block[i].pan ? others : [...others, ...pans]));
+		// The block's height as a length, if it's lined up with the mat, so the
+		// copies are lined up too.
+		const tops = block.map((c) => c.at.y);
+		let tall: Len | null = null;
+		if (tops.every(Boolean)) {
+			const top = tops.reduce((a, b) => (lenPx(b!) < lenPx(a!) ? b : a))!;
+			const ends = block.map((c) => lenAdd(c.at.y!, size(c.kind, c.turned).h));
+			const end = ends.reduce((a, b) => (lenPx(b) > lenPx(a) ? b : a));
+			tall = lenSub(end, top);
+			if (Math.abs(lenPx(tall) - dy) > 0.5) tall = null;
+		}
+		const made = block.map((c) => ({
+			id: nextId++,
+			kind: c.kind,
+			sign: c.sign,
+			turned: c.turned,
+			x: c.x,
+			y: c.y + dy,
+			at: { x: c.at.x, y: c.at.y && tall ? lenAdd(c.at.y, tall) : null }
+		}));
+		growPans(made.filter((_, i) => block[i].pan));
+		return made;
+	}
+
+	/** Solve: grow both pans, together, tall enough to hold these tiles. */
+	function growPans(inPans: Tile[]) {
+		if (!bal || !inPans.length) return;
+		const need = Math.max(...inPans.map((t) => t.y + rectOf(t).h)) + PAN_PAD - bal.left.y;
+		if (need > bal.left.h) bal = withHeight(bal, need);
+	}
+
+	/** Copies of tiles. A selection's copies go directly below it, laid out the
+	 *  same (see `below`); copies of tiles in one row on a side of the T go on
+	 *  along the row. The copies are selected, so the next Duplicate copies on. */
 	function duplicate(ids: number[]) {
-		const chosen = tiles.filter((t) => ids.includes(t.id) && movable(t));
+		const chosen = tiles.filter((t) => ids.includes(t.id) && movable(t) && !vanished(t));
 		if (!chosen.length) return;
-		if (chosen.length === 1) {
-			const [t] = chosen;
-			const r = rectOf(t);
-			const copy = { id: nextId++, kind: t.kind, sign: t.sign, turned: t.turned };
-			const down = !faded && rowOf(t, ARM) === 'left';
-			change(land(copy, down ? t.x : t.x + r.w + GAP, down ? t.y + r.h + GAP : t.y));
-			select([copy.id]);
+		const row = !faded && !solving ? rowOf(chosen[0], ARM) : null;
+		if (row && chosen.every((t) => rowOf(t, ARM) === row)) {
+			const along = (r: Rect) => (row === 'top' ? [r.x, r.w] : [r.y, r.h]);
+			const rowEnd = Math.max(
+				...tiles
+					.filter((t) => rowOf(t, ARM) === row)
+					.map((t) => along(rectOf(t)).reduce((a, b) => a + b))
+			);
+			const start = Math.min(...chosen.map((t) => along(rectOf(t))[0]));
+			const copies = chosen.map((t) => ({
+				...t,
+				id: nextId++,
+				x: row === 'top' ? t.x + rowEnd - start : t.x,
+				y: row === 'left' ? t.y + rowEnd - start : t.y,
+				at: { x: null, y: null }
+			}));
+			change([...tiles, ...copies]);
+			select(copies.map((t) => t.id));
 			return;
 		}
-		const box = bounds(chosen.map(rectOf));
-		const copies = chosen.map((t) => ({
-			...t,
-			id: nextId++,
-			x: t.x + box.w + UNIT,
-			at: { x: null, y: null }
-		}));
-		change([...tiles, ...copies]);
-		select(copies.map((t) => t.id));
+		const made = below(chosen.map(copied));
+		change([...tiles, ...made]);
+		select(made.map((t) => t.id));
 	}
 
 	function remove(ids: number[]) {
@@ -727,69 +1077,39 @@
 		select([...selected].filter((id) => !gone.has(id)));
 	}
 
-	/** Tiles copied with Ctrl/⌘ + C or X: what they are, and where each sits from
-	 *  the top-left of them all. Kept in the page, not the system clipboard. */
-	let clipboard: { kind: Kind; sign: Sign; turned: boolean; ox: number; oy: number }[] = [];
-	/** Where the pointer last was on screen, to paste there. */
-	let pointerAt: { x: number; y: number } | null = null;
-	/** Where the last paste went, and how many pastes in a row have gone there,
-	 *  so pasting again without moving steps each copy on instead of stacking them. */
-	let pasted: { at: { x: number; y: number } | null; n: number } = { at: null, n: 0 };
+	/** Tiles copied with Ctrl/⌘ + C or X, as they lay, kept in the page, not the
+	 *  system clipboard. After each paste it holds the pasted tiles, so the
+	 *  next paste goes below those. */
+	let clipboard: Copied[] = [];
+	/** The clipboard's tiles were cut, so the next paste puts them back where they were. */
+	let cutFrom = false;
 
-	function copy(ids: number[]): boolean {
+	function copy(ids: number[], cut = false): boolean {
 		const chosen = tiles.filter((t) => ids.includes(t.id) && movable(t) && !vanished(t));
 		if (!chosen.length) return false;
-		const box = bounds(chosen.map(rectOf));
-		clipboard = chosen.map((t) => ({
-			kind: t.kind,
-			sign: t.sign,
-			turned: t.turned,
-			ox: t.x - box.x,
-			oy: t.y - box.y
-		}));
-		pasted = { at: null, n: 0 };
+		clipboard = chosen.map(copied);
+		cutFrom = cut;
 		return true;
 	}
 
-	/** The copied tiles, set down centred on the pointer when it's over the board,
-	 *  or else in the middle of the view. Pasting again in the same place steps
-	 *  down and right. One tile snaps like a dropped one. The pasted tiles are selected. */
+	/** The copied tiles, directly below what was copied (or the last paste), or,
+	 *  just after a cut, back where they were. The pasted tiles are selected. */
 	function paste() {
-		if (!clipboard.length || step === 'done' || !boardEl) return;
-		const w = Math.max(...clipboard.map((c) => c.ox + lenPx(size(c.kind, c.turned).w)));
-		const h = Math.max(...clipboard.map((c) => c.oy + lenPx(size(c.kind, c.turned).h)));
-		const r = boardEl.getBoundingClientRect();
-		const over =
-			pointerAt &&
-			pointerAt.x >= r.left &&
-			pointerAt.x <= r.right &&
-			pointerAt.y >= r.top &&
-			pointerAt.y <= r.bottom;
-		const at = over ? pointerAt! : { x: r.left + boardW / 2, y: r.top + boardH / 2 };
-		const again = pasted.at?.x === at.x && pasted.at?.y === at.y;
-		pasted = { at, n: again ? pasted.n + 1 : 0 };
-		const pt = toBoard(at.x, at.y);
-		const x = pt.x - w / 2 + pasted.n * UNIT;
-		const y = pt.y - h / 2 + pasted.n * UNIT;
-		const made = clipboard.map((c) => ({
-			id: nextId++,
-			kind: c.kind,
-			sign: c.sign,
-			turned: c.turned
-		}));
-		if (made.length === 1) {
-			change(land(made[0], x, y));
-		} else {
-			change([
-				...tiles,
-				...made.map((t, i) => ({
-					...t,
-					x: x + clipboard[i].ox,
-					y: y + clipboard[i].oy,
-					at: { x: null, y: null }
+		if (!clipboard.length || step === 'done') return;
+		const made = cutFrom
+			? clipboard.map((c) => ({
+					id: nextId++,
+					kind: c.kind,
+					sign: c.sign,
+					turned: c.turned,
+					x: c.x,
+					y: c.y,
+					at: c.at
 				}))
-			]);
-		}
+			: below(clipboard);
+		clipboard = made.map((t, i) => ({ ...copied(t), pan: clipboard[i].pan }));
+		cutFrom = false;
+		change([...tiles, ...made]);
 		select(made.map((t) => t.id));
 	}
 
@@ -821,14 +1141,15 @@
 
 	/** Whether a tile can turn: an x tile, and not on a side of the T, which
 	 *  holds its tiles the way they run. */
-	const turnable = (t: Tile) => t.kind === 'x' && movable(t) && (faded || !rowOf(t, ARM));
+	const turnable = (t: Tile) =>
+		t.kind === 'x' && movable(t) && (faded || solving || !rowOf(t, ARM));
 
 	/** An x tile turned about its end, snapped to what's near it. */
 	function turned(t: Tile, base: Tile[]): Tile {
 		const next = { ...t, turned: !t.turned };
 		const others = base.filter((o) => o.id !== t.id && !vanished(o));
 		const pin = pinFor(t.kind, next.turned, t.x, t.y);
-		return { ...next, ...settle(next, t.x, t.y, others, top, left, SNAP_REACH / zoom, pin) };
+		return { ...next, ...settle(next, t.x, t.y, others, ...sides(), SNAP_REACH / zoom, pin) };
 	}
 
 	/** Turn the x tiles among these, each about its own end. */
@@ -867,6 +1188,8 @@
 		ids: number[];
 		phase: 'rumble' | 'merge';
 		to: Record<number, { x: number; y: number }>;
+		/** How long the slide together takes: longer when the pairs lie further apart. */
+		ms: number;
 	} | null>(null);
 
 	/** One bit of a poof: a puff of cloud, a speck of dust or a sparkle, heading
@@ -924,41 +1247,76 @@
 		];
 	}
 
-	function zeroOut(id: number) {
-		const other = partner(id);
-		const t = tiles.find((t) => t.id === id);
-		if (!other || !t || zeroing) return;
-		const a = rectOf(t);
-		const b = rectOf(other);
-		const mid = {
-			x: (Math.min(a.x, b.x) + Math.max(a.x + a.w, b.x + b.w)) / 2,
-			y: (Math.min(a.y, b.y) + Math.max(a.y + a.h, b.y + b.h)) / 2
-		};
-		// How far each tile slides to land right on top of the other, in the middle.
-		const to = {
-			[t.id]: { x: mid.x - centre(a).x, y: mid.y - centre(a).y },
-			[other.id]: { x: mid.x - centre(b).x, y: mid.y - centre(b).y }
-		};
-		select([]);
-		zeroing = { ids: [t.id, other.id], phase: 'rumble', to };
+	/** The zero pairs these selected tiles make. One tile pairs with the
+	 *  opposite tile lying flush against it, or a selected opposite; several
+	 *  pair up nearest first, but in Solve only within one pan, or both off the
+	 *  balance, never across the middle. */
+	function pairsIn(chosen: Tile[]): [Tile, Tile][] {
+		const region = (t: Tile) => (bal && step === 'balance' ? panOf(t) : null);
+		if (chosen.length === 1) {
+			const other = partner(chosen[0].id);
+			return other ? [[chosen[0], other]] : [];
+		}
+		return pairUp(chosen, region);
+	}
+
+	/** Zero out these pairs together: they rumble, each pair slides into each
+	 *  other, and they poof. */
+	function zeroOut(pairs: [Tile, Tile][]) {
+		if (!pairs.length || zeroing) return;
+		const to: Record<number, { x: number; y: number }> = {};
+		const spots = pairs.map(([t, other]) => {
+			const a = rectOf(t);
+			const b = rectOf(other);
+			const mid = {
+				x: (Math.min(a.x, b.x) + Math.max(a.x + a.w, b.x + b.w)) / 2,
+				y: (Math.min(a.y, b.y) + Math.max(a.y + a.h, b.y + b.h)) / 2
+			};
+			// The middle between them, or between their middles when they lie apart.
+			const ca = center(a);
+			const cb = center(b);
+			const meet = flushPair(t, other) ? mid : { x: (ca.x + cb.x) / 2, y: (ca.y + cb.y) / 2 };
+			// How far each tile slides to land right on top of the other.
+			to[t.id] = { x: meet.x - ca.x, y: meet.y - ca.y };
+			to[other.id] = { x: meet.x - cb.x, y: meet.y - cb.y };
+			return { meet, a, b, far: Math.hypot(ca.x - cb.x, ca.y - cb.y) };
+		});
+		const ids = pairs.flat().map((t) => t.id);
+		const ms = Math.min(700, Math.max(MERGE_MS, Math.max(...spots.map((p) => p.far)) * 1.2));
+		const paired = new Set(ids);
+		// Tiles left without a partner stay selected.
+		select([...selected].filter((id) => !paired.has(id)));
+		// With less motion asked for, the pairs just go.
+		if (still()) {
+			change(tiles.filter((o) => !paired.has(o.id)));
+			return;
+		}
+		zeroing = { ids, phase: 'rumble', to, ms };
 		setTimeout(() => zeroing && (zeroing = { ...zeroing, phase: 'merge' }), RUMBLE_MS);
 		setTimeout(
 			() => {
-				const w = Math.max(a.w, b.w);
-				const h = Math.max(a.h, b.h);
-				// The 0 they make, as big as the pair allows, waiting under the cloud.
-				const zero = Math.min(48, Math.max(26, Math.min(w, h) * 0.95));
-				const poof = { id: nextId++, ...mid, zero, bits: poofBits(w, h) };
-				poofs = [...poofs, poof];
-				setTimeout(() => (poofs = poofs.filter((q) => q.id !== poof.id)), POOF_MS);
+				const made = spots.map(({ meet, a, b }) => {
+					const w = Math.max(a.w, b.w);
+					const h = Math.max(a.h, b.h);
+					// The 0 they make, as big as the pair allows, waiting under the cloud.
+					const zero = Math.min(48, Math.max(26, Math.min(w, h) * 0.95));
+					// Drawn where the pair is seen, in a pan that hangs down.
+					return { id: nextId++, x: meet.x, y: meet.y + offset(a), zero, bits: poofBits(w, h) };
+				});
+				poofs = [...poofs, ...made];
+				const gone = new Set(made.map((q) => q.id));
+				setTimeout(() => (poofs = poofs.filter((q) => !gone.has(q.id))), POOF_MS);
 			},
-			RUMBLE_MS + MERGE_MS - POOF_LEAD_MS
+			RUMBLE_MS + ms - POOF_LEAD_MS
 		);
 		setTimeout(() => {
 			zeroing = null;
-			change(tiles.filter((o) => o.id !== t.id && o.id !== other.id));
-		}, RUMBLE_MS + MERGE_MS);
+			change(tiles.filter((o) => !paired.has(o.id)));
+		}, RUMBLE_MS + ms);
 	}
+
+	/** Whether two tiles lie flush, as `zeroPairs` finds them. */
+	const flushPair = (a: Tile, b: Tile) => zeroPairs([a, b]).length === 1;
 
 	// --- the buttons above the selected tiles ---
 
@@ -968,14 +1326,15 @@
 		if (!chosen.length) return null;
 		// One tile in a zero pair can zero out; the buttons then sit above both
 		// tiles, so neither is hidden.
-		const other = chosen.length === 1 ? partner(chosen[0].id) : null;
+		const zero = pairsIn(chosen);
+		const other = chosen.length === 1 && zero.length ? zero[0][1] : null;
 		const box = bounds([...chosen, ...(other ? [other] : [])].map(rectOf));
 		return {
 			ids: chosen.map((t) => t.id),
 			canTurn: chosen.some(turnable),
-			zero: other ? chosen[0].id : null,
+			zero,
 			x: box.x + box.w / 2,
-			y: box.y
+			y: box.y + offset(box)
 		};
 	});
 
@@ -1008,15 +1367,19 @@
 		if (!drag?.moved || !boardEl) return [];
 		if (hit(trashEl, drag.cx, drag.cy) || hit(toolbarEl, drag.cx, drag.cy)) return [];
 		const id = drag.source.from === 'board' ? drag.source.id : -1;
+		const copying = drag.copy && drag.source.from === 'board';
+		const before = new Set(tiles.map((t) => t.id));
 		const moving = new Set([id, ...drag.group]);
 		return arrange(drop(drag, drag.cx, drag.cy, id))
-			.filter((t) => moving.has(t.id))
-			.map(rectOf);
+			.filter((t) => (copying ? !before.has(t.id) : moving.has(t.id)))
+			.map((t) => lifted(rectOf(t)));
 	});
 
 	/** The board tiles being dragged, drawn by their ghosts while their places stay empty. */
 	const held = $derived(
-		drag?.moved && drag.source.from === 'board' ? new Set([drag.source.id, ...drag.group]) : null
+		drag?.moved && drag.source.from === 'board' && !drag.copy
+			? new Set([drag.source.id, ...drag.group])
+			: null
 	);
 	/** The ghosts: the tile under the pointer and the rest of the selection, as
 	 *  far from it as they lie on the board. */
@@ -1046,8 +1409,10 @@
 	function key(e: KeyboardEvent) {
 		if (e.key === 'Escape') {
 			picked = null;
+			confirmingReset = false;
 			select([]);
 		}
+		if (e.key === 'Alt' && drag) drag.copy = true;
 		if (typing(e)) return;
 		const mod = e.ctrlKey || e.metaKey;
 		const k = e.key.toLowerCase();
@@ -1064,12 +1429,13 @@
 		} else if (mod && k === 'd') {
 			e.preventDefault();
 			duplicate([...selected]);
-		} else if (mod && (k === 'c' || k === 'x') && !e.shiftKey && !e.altKey) {
+		} else if (mod && (e.code === 'KeyC' || e.code === 'KeyX' || k === 'c' || k === 'x')) {
 			// With no tiles selected, leave it to the browser, to copy text.
-			if (window.getSelection()?.toString() || !copy([...selected])) return;
+			const cut = e.code === 'KeyX' || k === 'x';
+			if (!selected.size || !copy([...selected], cut)) return;
 			e.preventDefault();
-			if (k === 'x') remove([...selected]);
-		} else if (mod && k === 'v' && !e.shiftKey && !e.altKey && clipboard.length) {
+			if (cut) remove([...selected]);
+		} else if (mod && (k === 'v' || e.code === 'KeyV') && clipboard.length) {
 			e.preventDefault();
 			paste();
 		} else if ((e.key === 'Delete' || e.key === 'Backspace') && selected.size) {
@@ -1077,6 +1443,9 @@
 			remove([...selected]);
 		} else if (mod || e.altKey) {
 			return;
+		} else if (k === '0' && focus?.zero.length) {
+			e.preventDefault();
+			zeroOut(focus.zero);
 		} else if (k === 'v') tool = 'select';
 		else if (k === 'h') tool = 'hand';
 		else if (e.key === ' ') {
@@ -1086,21 +1455,106 @@
 	}
 	function keyUp(e: KeyboardEvent) {
 		if (e.key === ' ') spaceHeld = false;
+		if (e.key === 'Alt' && drag) drag.copy = false;
+	}
+
+	// --- starting again ---
+
+	/** Whether the Reset button is asking to be sure. */
+	let confirmingReset = $state(false);
+
+	/** Back to step 1, with the starting tiles where they began. Asked first,
+	 *  since passed Checks can't be undone. */
+	async function reset() {
+		confirmingReset = false;
+		if (zeroing) return;
+		step = steps[0];
+		nextId = 1;
+		tiles = startingTiles();
+		bal = firstBal;
+		top = [];
+		left = [];
+		sideIds = new Set();
+		locked = new Set();
+		grid = null;
+		product = new Set();
+		xPan = 'left';
+		fadedIds = new Set();
+		division = null;
+		unitCount = 0;
+		answer = '';
+		error = '';
+		note = '';
+		past = [];
+		future = [];
+		clipboard = [];
+		cutFrom = false;
+		select([]);
+		clearMarks();
+		await tick();
+		fit(500);
 	}
 </script>
 
+{#snippet piece(t: Tile)}
+	{@const moving = zeroing?.ids.includes(t.id) ? zeroing : null}
+	<button
+		type="button"
+		class="piece"
+		class:fixed={!movable(t)}
+		class:locked={sideIds.has(t.id)}
+		class:gone={vanished(t)}
+		class:selected={selected.has(t.id)}
+		class:held={held?.has(t.id)}
+		class:glide={gliding}
+		class:rumble={moving?.phase === 'rumble'}
+		class:merge={moving?.phase === 'merge'}
+		style:left="{t.x}px"
+		style:top="{t.y}px"
+		style:--to-x="{moving?.to[t.id].x ?? 0}px"
+		style:--to-y="{moving?.to[t.id].y ?? 0}px"
+		style:--merge-ms="{moving?.ms ?? 280}ms"
+		aria-label="{t.sign < 0 ? 'negative ' : ''}{t.kind === 'x2' ? 'x squared' : t.kind} tile"
+		onpointerdown={(e) =>
+			movable(t)
+				? grab(
+						e,
+						{
+							source: { from: 'board', id: t.id },
+							kind: t.kind,
+							sign: t.sign,
+							turned: t.turned
+						},
+						zoom
+					)
+				: undefined}
+	>
+		<span
+			class="face"
+			class:swing-down={spinning.get(t.id) === 'down'}
+			class:swing-up={spinning.get(t.id) === 'up'}
+			class:flip={flippingTile.has(t.id)}
+			style:--pivot="{UNIT / 2}px"
+		>
+			<TileView kind={t.kind} sign={t.sign} turned={t.turned} wrong={wrong.has(t.id)} />
+		</span>
+	</button>
+{/snippet}
+
 <svelte:window
 	onpointermove={(e) => {
-		pointerAt = { x: e.clientX, y: e.clientY };
 		dragMove(e);
 	}}
 	onpointerup={dragUp}
 	onkeydown={key}
 	onkeyup={keyUp}
 	onblur={() => (spaceHeld = false)}
+	onpointerdown={(e) => {
+		if (confirmingReset && !(e.target as Element).closest?.('.reset-wrap')) confirmingReset = false;
+	}}
 />
 
-<div class="activity">
+<div class="activity" style:--toolbar-h="{toolbarH}px">
 	<!-- The whiteboard. Everything inside .layer is in board pixels and zooms together. -->
 	<div
 		class="board"
@@ -1117,21 +1571,94 @@
 		aria-label="Algebra tiles board"
 	>
 		<div class="layer" style:transform="translate({panX}px, {panY}px) scale({zoom})">
-			<!-- The mat: one box, split by lines into the corner, the two sides and
+			{#if bal}
+				{#if !liveBalance}
+					<!-- With the live balance off, no balance: the equation's two sides,
+					     dashed boxes either side of a line standing for =. -->
+					{#each [bal.left, bal.right] as r, i (i)}
+						<div
+							class="box side-box"
+							class:gone={!!division}
+							style:left="{r.x}px"
+							style:top="{r.y}px"
+							style:width="{r.w}px"
+							style:height="{r.h}px"
+						></div>
+					{/each}
+				{/if}
+				{#if division}
+					<!-- The division step: a box across the line for each x tile. -->
+					{#each division.boxes as b, i (i)}
+						<div
+							class="box"
+							class:bad={badBoxes.includes(i)}
+							class:gone={i > 0 && step !== 'divide'}
+							style:left="{b.x}px"
+							style:top="{b.y}px"
+							style:width="{b.w}px"
+							style:height="{b.h}px"
+						></div>
+					{/each}
+				{/if}
+				<!-- The balance's post, which stays when the rest of the balance fades
+				     after step 1, and stretches into the line standing for =, over
+				     the boxes. With the live balance off, it's that line from the start. -->
+				{@const d = division}
+				{@const one = step !== 'divide'}
+				{@const line = !!d || !liveBalance}
+				{@const postTop = !d
+					? liveBalance
+						? bal.pivot.y
+						: bal.left.y - UNIT / 2
+					: one
+						? d.boxes[0].y - UNIT / 2
+						: d.line.top}
+				{@const postEnd = !d
+					? liveBalance
+						? bal.foot + 8
+						: bal.left.y + bal.left.h + UNIT / 2
+					: one
+						? d.boxes[0].y + d.boxes[0].h + UNIT / 2
+						: d.line.bottom}
+				<div
+					class="post"
+					class:equals={line}
+					style:left="{(d ? d.line.x : bal.pivot.x) - (line ? 2 : 7)}px"
+					style:top="{postTop}px"
+					style:width="{line ? 4 : 14}px"
+					style:height="{postEnd - postTop}px"
+				></div>
+				<!-- The rest of the balance, which fades once step 1 passes. -->
+				{#if liveBalance}<svg class="art" width="1" height="1" aria-hidden="true">
+						<BalanceArt
+							post={false}
+							left={bal.left}
+							right={bal.right}
+							pivot={bal.pivot}
+							arm={bal.arm}
+							foot={bal.foot}
+							{tilt}
+							{drops}
+							faded={!!division}
+						/>
+					</svg>{/if}
+			{:else}
+				<!-- The mat: one box, split by lines into the corner, the two sides and
 			     the rectangle. -->
-			<div
-				class="mat"
-				class:faded
-				style:left="{-STRIP}px"
-				style:top="{-STRIP}px"
-				style:width="{ARM + STRIP}px"
-				style:height="{ARM + STRIP}px"
-				style:--strip="{STRIP}px"
-			>
-				<div class="side top" class:open={step === 'sides'}></div>
-				<div class="side left" class:open={step === 'sides'}></div>
-				<div class="corner">×</div>
-			</div>
+				<div
+					class="mat"
+					class:faded
+					style:left="{-STRIP}px"
+					style:top="{-STRIP}px"
+					style:width="{ARM + STRIP}px"
+					style:height="{ARM + STRIP}px"
+					style:--strip="{STRIP}px"
+				>
+					<div class="side top" class:open={step === 'sides'}></div>
+					<div class="side left" class:open={step === 'sides'}></div>
+					<div class="corner">×</div>
+				</div>
+			{/if}
 
 			{#if faded}
 				{#each GROUP_KINDS as k (k)}
@@ -1157,47 +1684,13 @@
 				></div>
 			{/each}
 
-			{#each tiles as t (t.id)}
-				{@const moving = zeroing?.ids.includes(t.id) ? zeroing : null}
-				<button
-					type="button"
-					class="piece"
-					class:fixed={!movable(t)}
-					class:locked={sideIds.has(t.id)}
-					class:gone={vanished(t)}
-					class:selected={selected.has(t.id)}
-					class:held={held?.has(t.id)}
-					class:rumble={moving?.phase === 'rumble'}
-					class:merge={moving?.phase === 'merge'}
-					style:left="{t.x}px"
-					style:top="{t.y}px"
-					style:--to-x="{moving?.to[t.id].x ?? 0}px"
-					style:--to-y="{moving?.to[t.id].y ?? 0}px"
-					aria-label="{t.sign < 0 ? 'negative ' : ''}{t.kind === 'x2' ? 'x squared' : t.kind} tile"
-					onpointerdown={(e) =>
-						movable(t)
-							? grab(
-									e,
-									{
-										source: { from: 'board', id: t.id },
-										kind: t.kind,
-										sign: t.sign,
-										turned: t.turned
-									},
-									zoom
-								)
-							: e.stopPropagation()}
-				>
-					<span
-						class="face"
-						class:swing-down={spinning.get(t.id) === 'down'}
-						class:swing-up={spinning.get(t.id) === 'up'}
-						class:flip={flippingTile.has(t.id)}
-						style:--pivot="{UNIT / 2}px"
-					>
-						<TileView kind={t.kind} sign={t.sign} turned={t.turned} wrong={wrong.has(t.id)} />
-					</span>
-				</button>
+			<!-- The tiles, those in each pan drawn as far down as it hangs, moving with it. -->
+			{#each [null, 'left', 'right'] as const as which (which ?? 'off')}
+				<div class="pan-tiles" style:translate="0 {which ? drops[which] : 0}px">
+					{#each tiles.filter((t) => panOf(t) === which) as t (t.id)}
+						{@render piece(t)}
+					{/each}
+				</div>
 			{/each}
 
 			{#each poofs as q (q.id)}
@@ -1229,53 +1722,6 @@
 					style:height="{r.h}px"
 				></div>
 			{/each}
-
-			<!-- The step's instructions and its Check, written on the board under the T. -->
-			<div
-				class="row"
-				style:left="{ROW.x}px"
-				style:top="{ROW.y}px"
-				style:width="{ROW.w}px"
-				role="presentation"
-				onpointerdown={(e) => e.stopPropagation()}
-			>
-				{#if step === 'done'}
-					<p class="complete">Yay! It’s complete.</p>
-					<p class="final">{prettyText(p.given)} = {prettyText(answer)}</p>
-					{#if note}<p class="note">{note}</p>{/if}
-				{:else if step === 'equation'}
-					<div class="equation">
-						<span class="given">{prettyText(p.given)} =</span>
-						<div
-							class="field"
-							role="presentation"
-							onkeydown={(e) => {
-								if (e.key === 'Enter') {
-									e.preventDefault();
-									check();
-								}
-							}}
-						>
-							<MathInput
-								bind:value={answer}
-								aria-label="The other side of the equation"
-								placeholder={p.type === 'multiply' ? 'the product' : 'the factors'}
-							/>
-						</div>
-						<button type="button" class="btn-primary" onclick={check}>Check</button>
-					</div>
-					<p class="instructions">{instructions(step)}</p>
-					{#if error}<p class="error" aria-live="polite">{error}</p>{/if}
-				{:else}
-					<div class="instruct">
-						<div>
-							<p class="instructions">{instructions(step)}</p>
-							{#if error}<p class="error" aria-live="polite">{error}</p>{/if}
-						</div>
-						<button type="button" class="btn-primary" onclick={check}>Check</button>
-					</div>
-				{/if}
-			</div>
 		</div>
 	</div>
 
@@ -1318,12 +1764,12 @@
 			<button type="button" onclick={() => duplicate(focus.ids)} title="Duplicate (Ctrl+D)">
 				<Copy size={15} /> Duplicate
 			</button>
-			{#if focus.zero !== null}
+			{#if focus.zero.length}
 				<button
 					type="button"
 					class="zero"
-					onclick={() => zeroOut(focus.zero!)}
-					title="These two make zero"
+					onclick={() => zeroOut(focus.zero)}
+					title="Zero out the zero pairs (0)"
 				>
 					Zero out
 				</button>
@@ -1340,27 +1786,86 @@
 		</div>
 	{/if}
 
-	<!-- The problem and its steps, across the top. -->
-	<header class="bar" bind:this={headerEl}>
-		<span class="kind">{p.type === 'multiply' ? 'Multiply' : 'Factor'}</span>
-		<h1 class="problem">{prettyText(p.given)}</h1>
-		<ol class="steps">
-			{#each steps as s, i (s)}
-				{@const done = steps.indexOf(step) > i || step === 'done'}
-				<li class:current={s === step} class:done>
-					<span class="num"
-						>{#if done}<Check size={12} strokeWidth={3} />{:else}{i + 1}{/if}</span
+	<!-- The problem, its steps and the step's Check, in one bar across the top.
+	     On the last step, the answer field takes the steps' place. -->
+	<div class="top" bind:this={headerEl}>
+		<header class="bar">
+			<span class="kind"
+				>{p.type === 'multiply' ? 'Multiply' : p.type === 'factor' ? 'Factor' : 'Solve'}</span
+			>
+			<span class="rule" aria-hidden="true"></span>
+			<h1 class="problem">{prettyText(p.given)}</h1>
+			<span class="rule last" aria-hidden="true"></span>
+			<!-- Every state of the steps' place is drawn, one over another, and only the
+			     current one shows: the bar is as wide and tall as its widest state from
+			     the start, and doesn't move as the steps go by. Check and Start again
+			     share one slot the same way. -->
+			<div class="work">
+				<div class="states">
+					<ol class="steps state" class:off={answering || step === 'done'}>
+						{#each steps as s, i (s)}
+							{@const done = steps.indexOf(step) > i}
+							<li class:current={s === step} class:done>
+								<span class="num"
+									>{#if done}<Check size={12} strokeWidth={3} />{:else}{i + 1}{/if}</span
+								>
+								{STEP_NAMES[s]}
+							</li>
+						{/each}
+					</ol>
+					<div
+						class="equation state"
+						class:off={!answering}
+						role="presentation"
+						onkeydown={(e) => {
+							if (e.key === 'Enter') {
+								e.preventDefault();
+								check();
+							}
+						}}
 					>
-					{STEP_NAMES[s]}
-				</li>
-			{/each}
-		</ol>
-	</header>
+						<span class="given">{eq ? 'x' : prettyText(p.given)} =</span>
+						<div class="field">
+							{#if eq}
+								<MathInput bind:value={answer} aria-label="What x is" placeholder="a number" />
+							{:else}
+								<MathInput
+									bind:value={answer}
+									aria-label="The other side of the equation"
+									placeholder={built?.type === 'multiply' ? 'the product' : 'the factors'}
+								/>
+							{/if}
+						</div>
+					</div>
+					<p class="complete state" class:off={step !== 'done'}>
+						<span class="final">{solved}</span>
+						<span class="yay"><Check size={18} strokeWidth={3} /> Yay! It’s complete.</span>
+					</p>
+				</div>
+				<div class="actions">
+					<button
+						type="button"
+						class="btn-primary check"
+						class:off={step === 'done'}
+						onclick={check}>Check</button
+					>
+					<button type="button" class="btn-ghost again" class:off={step !== 'done'} onclick={reset}>
+						<RotateCcw size={16} /> Start again
+					</button>
+				</div>
+			</div>
+		</header>
+		{#if error && step !== 'done'}
+			<p class="error" aria-live="polite">{error}</p>
+		{:else if note}
+			<p class="note">{note}</p>
+		{/if}
+	</div>
 
 	<!-- The toolbar, like a whiteboard app's: undo and redo; flip the tray to its
 	     negative tiles and turn its x tile; the tiles; and the trash. -->
 	{#if step !== 'done'}
-		<div class="toolbar" bind:this={toolbarEl} aria-label="Tiles">
+		<div class="toolbar" bind:this={toolbarEl} bind:offsetHeight={toolbarH} aria-label="Tiles">
 			<div class="group">
 				<button
 					type="button"
@@ -1406,11 +1911,34 @@
 				>
 					<Redo2 size={20} />
 				</button>
+				<div class="reset-wrap">
+					<button
+						type="button"
+						class="tool"
+						onclick={() => (confirmingReset = !confirmingReset)}
+						aria-expanded={confirmingReset}
+						title="Reset: start again from step 1"
+						aria-label="Reset"
+					>
+						<RotateCcw size={20} />
+					</button>
+					{#if confirmingReset}
+						<div class="confirm" role="dialog" aria-label="Start again?">
+							<p>Start again from step 1, with the tiles back where they began?</p>
+							<div>
+								<button type="button" class="btn-ghost" onclick={() => (confirmingReset = false)}
+									>Cancel</button
+								>
+								<button type="button" class="btn-primary" onclick={reset}>Reset</button>
+							</div>
+						</div>
+					{/if}
+				</div>
 			</div>
 			<div class="group">
 				<button
 					type="button"
-					class="tool labelled"
+					class="tool labeled"
 					onclick={flipTray}
 					title="Flip to the {traySign > 0 ? 'negative' : 'positive'} tiles"
 					aria-label="Flip to the {traySign > 0 ? 'negative' : 'positive'} tiles"
@@ -1419,7 +1947,7 @@
 				</button>
 				<button
 					type="button"
-					class="tool labelled"
+					class="tool labeled"
 					onclick={turnTray}
 					title="Turn the x tile"
 					aria-label="Turn the x tile"
@@ -1479,7 +2007,7 @@
 		<button type="button" onclick={() => zoomBy(1.25)} aria-label="Zoom in" title="Zoom in"
 			><Plus size={16} /></button
 		>
-		<button type="button" onclick={fit} aria-label="Fit everything on screen" title="Fit"
+		<button type="button" onclick={() => fit(350)} aria-label="Fit everything on screen" title="Fit"
 			><Maximize size={15} /></button
 		>
 	</div>
@@ -1580,6 +2108,70 @@
 		color: var(--muted);
 		font-weight: 700;
 	}
+	/* The balance, drawn by BalanceArt in board pixels; tiles lie over it. */
+	.art {
+		top: 0;
+		left: 0;
+		overflow: visible;
+		pointer-events: none;
+	}
+	.pan-tiles {
+		transition: translate 0.7s cubic-bezier(0.3, 0.7, 0.4, 1.1);
+	}
+	/* The division step: the balance's line, standing for =, and a dashed box
+	   across it for each x tile. */
+	/* The balance's post, gray like the rest of its stand; it stretches into
+	   the division step's line, darker, as the rest fades. */
+	.post {
+		border-radius: 7px 7px 0 0;
+		background: var(--line-strong);
+		pointer-events: none;
+		transition:
+			left 0.6s ease-in-out,
+			top 0.6s ease-in-out,
+			width 0.6s ease-in-out,
+			height 0.6s ease-in-out,
+			border-radius 0.6s,
+			background-color 0.6s;
+	}
+	.post.equals {
+		border-radius: 2px;
+		background: var(--muted);
+	}
+	.box {
+		border: 2px dashed var(--accent-line);
+		border-radius: 10px;
+		background: rgb(251 252 254 / 0.55);
+		pointer-events: none;
+		animation: appear 0.6s 0.25s both;
+		transition:
+			opacity 0.5s,
+			border-color 0.2s,
+			background 0.2s;
+	}
+	.box.bad {
+		border-color: var(--bad);
+		background: var(--bad-wash);
+	}
+	.box.gone {
+		opacity: 0;
+	}
+	/* With the live balance off, the equation's sides, there from the start. */
+	.box.side-box {
+		animation: none;
+	}
+	@keyframes appear {
+		from {
+			opacity: 0;
+		}
+	}
+	.pan-tiles {
+		top: 0;
+		left: 0;
+	}
+	.pan-tiles > .piece {
+		position: absolute;
+	}
 	.zone {
 		border: 2px dashed var(--line-strong);
 		border-radius: 12px;
@@ -1615,13 +2207,25 @@
 			opacity 0.5s,
 			filter 0.3s;
 	}
+	/* Sliding into place on its own, as the x tiles line up after step 1. */
+	.piece.glide {
+		transition:
+			left 0.6s ease-in-out,
+			top 0.6s ease-in-out,
+			opacity 0.5s,
+			filter 0.3s;
+	}
+	/* A locked tile can't be picked up, so a press on it is a press on the
+	   board: a tap there still places the tray tile picked, even where a
+	   phone's tap lands on the nearest button. */
 	.piece.fixed {
 		cursor: default;
+		pointer-events: none;
 	}
 	.face {
 		display: block;
 	}
-	/* Locked sides go grey, so it's plain they can't be changed now. */
+	/* Locked sides go gray, so it's plain they can't be changed now. */
 	.piece.locked {
 		filter: grayscale(1);
 		opacity: 0.55;
@@ -1689,7 +2293,7 @@
 	}
 	/* The pair slides into each other, speeding up as they go, in one motion. */
 	.piece.merge {
-		animation: merge 0.28s cubic-bezier(0.5, 0, 0.75, 0) forwards;
+		animation: merge var(--merge-ms, 280ms) cubic-bezier(0.5, 0, 0.75, 0) forwards;
 	}
 	@keyframes merge {
 		to {
@@ -1930,62 +2534,6 @@
 		color: var(--bad);
 	}
 
-	/* The instructions under the T, in board pixels, so they zoom with it. */
-	.row {
-		cursor: default;
-	}
-	.instruct {
-		display: flex;
-		align-items: flex-start;
-		justify-content: space-between;
-		gap: 16px;
-	}
-	.instructions {
-		color: var(--muted);
-		font-size: 15px;
-		line-height: 1.45;
-	}
-	.error {
-		margin-top: 6px;
-		color: var(--bad);
-		font-size: 14px;
-		font-weight: 600;
-		line-height: 1.35;
-	}
-	.row :global(.btn-primary) {
-		flex: none;
-	}
-	.equation {
-		display: flex;
-		align-items: center;
-		gap: 10px;
-		margin-bottom: 8px;
-	}
-	.given {
-		flex: none;
-		font-size: 22px;
-		font-weight: 700;
-		white-space: nowrap;
-	}
-	.field {
-		flex: 1;
-		min-width: 120px;
-	}
-	.complete {
-		color: var(--good);
-		font-size: 26px;
-		font-weight: 700;
-	}
-	.final {
-		margin-top: 4px;
-		font-size: 20px;
-		font-weight: 600;
-	}
-	.note {
-		margin-top: 6px;
-		color: var(--muted);
-	}
-
 	/* The bars float over the board like a whiteboard app's toolbars. */
 	.bar,
 	.toolbar,
@@ -1998,20 +2546,38 @@
 			0 1px 2px rgb(29 40 56 / 0.08),
 			0 10px 28px rgb(29 40 56 / 0.12);
 	}
-	.bar {
+	/* The top bar, one row: the activity │ the problem │ the steps … Check.
+	   On a narrow screen it wraps, the steps (or the answer) on a row of their own. */
+	.top {
+		position: absolute;
 		top: 0.75rem;
-		left: 50%;
+		left: 0.75rem;
+		right: 0.75rem;
+		z-index: 10;
+		display: flex;
+		flex-direction: column;
+		align-items: center;
+		gap: 0.4rem;
+		pointer-events: none;
+	}
+	.top > * {
+		pointer-events: auto;
+	}
+	.bar {
+		position: relative;
 		display: flex;
 		flex-wrap: wrap;
 		align-items: center;
-		justify-content: center;
-		gap: 0.5rem 1.25rem;
+		gap: 0.5rem 1rem;
 		width: max-content;
-		max-width: calc(100% - 1.5rem);
-		min-width: min(40rem, calc(100% - 1.5rem));
-		padding: 0.7rem 1.25rem;
+		max-width: 100%;
+		padding: 0.55rem 0.6rem 0.55rem 1rem;
 		border-radius: 14px;
-		transform: translateX(-50%);
+	}
+	.rule {
+		align-self: stretch;
+		width: 1px;
+		background: var(--line);
 	}
 	.kind {
 		padding: 0.15rem 0.55rem;
@@ -2024,9 +2590,158 @@
 		text-transform: uppercase;
 	}
 	.problem {
-		font-size: 1.45rem;
+		font-size: 1.35rem;
 		font-weight: 700;
 		white-space: nowrap;
+	}
+	/* The steps, or the answer, and Check pinned to the right. */
+	.work {
+		display: flex;
+		flex: 1 1 auto;
+		flex-wrap: nowrap;
+		align-items: center;
+		gap: 0.5rem 1rem;
+		min-width: 0;
+	}
+	.states {
+		display: grid;
+		flex: 1 1 auto;
+		align-items: center;
+		min-width: 0;
+	}
+	.state,
+	.actions > * {
+		grid-area: 1 / 1;
+	}
+	.actions {
+		display: grid;
+		flex: none;
+		justify-items: end;
+		align-items: center;
+		margin-left: auto;
+	}
+	/* A state that isn't the current one keeps its room, unseen. */
+	.off {
+		visibility: hidden;
+	}
+	@media (max-width: 640px) {
+		.rule.last {
+			display: none;
+		}
+		/* The steps, or the answer and Check, on a line of their own. */
+		.work {
+			flex-basis: 100%;
+		}
+		.steps {
+			flex: 1 1 auto;
+			min-width: 0;
+		}
+		.bar {
+			padding: 0.5rem 0.6rem;
+		}
+		.bar .problem {
+			font-size: 1.15rem;
+		}
+		.bar .given {
+			font-size: 1rem;
+		}
+		.bar .field {
+			min-width: 6rem;
+		}
+	}
+	/* The given and its field stay together on one line; the field gives way first. */
+	.equation {
+		display: flex;
+		flex: 1 1 auto;
+		flex-wrap: nowrap;
+		align-items: center;
+		gap: 0.6rem;
+		min-width: 0;
+	}
+	.given {
+		flex: none;
+		font-size: 1.2rem;
+		font-weight: 700;
+		white-space: nowrap;
+	}
+	.field {
+		flex: 1 1 14rem;
+		width: 14rem;
+		min-width: 5rem;
+		max-width: 24rem;
+	}
+	.complete {
+		display: flex;
+		flex: 1 1 auto;
+		flex-wrap: wrap;
+		min-width: 0;
+		align-items: center;
+		gap: 0.4rem 0.9rem;
+		color: var(--good);
+		font-weight: 700;
+	}
+	.yay {
+		display: inline-flex;
+		align-items: center;
+		gap: 0.3rem;
+		white-space: nowrap;
+	}
+	.final {
+		white-space: nowrap;
+		color: var(--ink);
+		font-size: 1.15rem;
+	}
+	.again {
+		white-space: nowrap;
+	}
+	/* What a failed Check found wrong, just under the bar. */
+	.error,
+	.note {
+		max-width: min(40rem, 100%);
+		padding: 0.45rem 0.9rem;
+		border-radius: 10px;
+		font-size: 0.92rem;
+		font-weight: 600;
+		line-height: 1.35;
+		text-align: center;
+		box-shadow: 0 4px 14px rgb(29 40 56 / 0.12);
+	}
+	.error {
+		border: 1px solid var(--bad-line);
+		background: var(--bad-wash);
+		color: var(--bad);
+	}
+	.note {
+		border: 1px solid var(--line);
+		background: var(--paper);
+		color: var(--muted);
+	}
+	/* Reset asks first, in a little box over the toolbar. */
+	.reset-wrap {
+		position: relative;
+	}
+	.confirm {
+		position: absolute;
+		bottom: calc(100% + 0.9rem);
+		left: 50%;
+		width: 16rem;
+		padding: 0.8rem;
+		border: 1px solid var(--line);
+		border-radius: 12px;
+		background: var(--paper);
+		box-shadow: 0 10px 28px rgb(29 40 56 / 0.18);
+		transform: translateX(-50%);
+	}
+	.confirm p {
+		font-size: 0.9rem;
+		font-weight: 600;
+		line-height: 1.35;
+	}
+	.confirm div {
+		display: flex;
+		justify-content: flex-end;
+		gap: 0.4rem;
+		margin-top: 0.6rem;
 	}
 	.steps {
 		display: flex;
@@ -2095,7 +2810,7 @@
 		color: var(--ink-soft);
 		cursor: pointer;
 	}
-	.tool.labelled {
+	.tool.labeled {
 		gap: 0.1rem;
 		width: 3.2rem;
 		height: 3.6rem;
@@ -2224,9 +2939,76 @@
 	.zoom button:hover {
 		background: var(--paper-low);
 	}
+	/* Less motion: everything that moves, turns, fades or slides happens at once. */
+	@media (prefers-reduced-motion: reduce) {
+		.activity :global(*),
+		.activity :global(*::before),
+		.activity :global(*::after) {
+			animation-duration: 1ms !important;
+			animation-delay: 0s !important;
+			animation-iteration-count: 1 !important;
+			transition-duration: 1ms !important;
+			transition-delay: 0s !important;
+		}
+	}
 	@media (max-width: 900px) {
 		.toolbar {
 			bottom: 4rem;
+		}
+	}
+	/* On a phone the toolbar fits the screen, 16px in from each side, in two
+	   rows: the tools, icons only, then the tray and the trash. The zoom sits
+	   above it, on the right. */
+	@media (max-width: 600px) {
+		.toolbar {
+			right: 16px;
+			bottom: 0.75rem;
+			left: 16px;
+			flex-wrap: wrap;
+			justify-content: center;
+			height: auto;
+			transform: none;
+		}
+		.group {
+			gap: 0;
+			padding: 0.2rem 0.15rem;
+			border-right: none;
+		}
+		.tool,
+		.tool.labeled {
+			width: 2.5rem;
+			height: 2.5rem;
+		}
+		.tool.labeled span {
+			display: none;
+		}
+		/* The tray and the trash share the second row, whatever the width. */
+		.palette {
+			flex: 1 1 calc(100% - 3.5rem);
+			justify-content: center;
+			gap: 0.6rem;
+			padding: 0.3rem 0.5rem 0.45rem;
+			border-top: 1px solid var(--line);
+		}
+		.trash {
+			width: 3.5rem;
+			border-top: 1px solid var(--line);
+			border-radius: 0 0 17px 0;
+		}
+		.zoom {
+			bottom: calc(var(--toolbar-h) + 1.25rem);
+		}
+		.zoom button {
+			width: 2.5rem;
+			height: 2.5rem;
+		}
+		.confirm {
+			position: fixed;
+			right: 16px;
+			bottom: calc(var(--toolbar-h) + 1.5rem);
+			left: 16px;
+			width: auto;
+			transform: none;
 		}
 	}
 </style>

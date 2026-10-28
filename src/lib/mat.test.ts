@@ -13,6 +13,8 @@ import {
 	settle,
 	readSide,
 	zeroPairs,
+	pairUp,
+	stackBelow,
 	GAP,
 	type Kind,
 	type Len,
@@ -125,9 +127,7 @@ describe('Multiply', () => {
 		expect(pos.length).toBe(2);
 		expect(checkGroups([], zeroed, poly).ok).toBe(true);
 		expect(checkGroups(tiles.slice(0, 1), zeroed, poly).ok).toBe(false);
-		expect(
-			checkGroups([], { ...zeroed, x2: [...zeroed.x2, zeroed.unit[0]] }, poly).ok
-		).toBe(false);
+		expect(checkGroups([], { ...zeroed, x2: [...zeroed.x2, zeroed.unit[0]] }, poly).ok).toBe(false);
 	});
 });
 
@@ -260,5 +260,55 @@ describe('packSides', () => {
 		const added = free('unit', 0, -GAP - UNIT);
 		const packed = packSides([kept, added], ARM, (t) => t.id === kept.id);
 		expect(packed.map((t) => t.x)).toEqual([0, UNIT]);
+	});
+});
+
+describe('zeroing out a selection', () => {
+	const t = (id: number, kind: Kind, sign: Sign, x: number, y = 0): Tile => ({
+		id,
+		kind,
+		sign,
+		turned: false,
+		x,
+		y,
+		at: { x: null, y: null }
+	});
+	test('pairs each positive tile with the nearest negative of its kind, flush or not', () => {
+		const tiles = [
+			t(1, 'unit', 1, 0),
+			t(2, 'unit', -1, 300),
+			t(3, 'unit', -1, 100),
+			t(4, 'unit', 1, 380),
+			t(5, 'x', -1, 0, 200)
+		];
+		const pairs = pairUp(tiles).map(([a, b]) => [a.id, b.id]);
+		expect(pairs).toEqual([
+			[4, 2],
+			[1, 3]
+		]);
+	});
+	test('leaves tiles without a partner out', () => {
+		const pairs = pairUp([t(1, 'unit', 1, 0), t(2, 'unit', 1, 40), t(3, 'unit', -1, 80)]);
+		expect(pairs.map(([a, b]) => [a.id, b.id])).toEqual([[2, 3]]);
+		expect(pairUp([t(1, 'unit', 1, 0), t(2, 'x', -1, 40)])).toEqual([]);
+	});
+	test('pairs only within a region, never across it', () => {
+		const tiles = [t(1, 'unit', 1, 90), t(2, 'unit', -1, 110), t(3, 'unit', -1, 0)];
+		const side = (x: Tile) => (x.x < 100 ? 'left' : 'right');
+		expect(pairUp(tiles, side).map(([a, b]) => [a.id, b.id])).toEqual([[1, 3]]);
+	});
+});
+
+describe('copies below', () => {
+	const r = (x: number, y: number, w = UNIT, h = UNIT) => ({ x, y, w, h });
+	test('directly below the block, flush', () => {
+		const block = [r(0, 0), r(UNIT, 0), r(0, UNIT)];
+		expect(stackBelow(block, () => [])).toBe(2 * UNIT);
+	});
+	test('further down, past what lies in the way', () => {
+		const block = [r(0, 0), r(UNIT, 0)];
+		expect(stackBelow(block, () => [r(UNIT, UNIT, UNIT, 3 * UNIT)])).toBe(4 * UNIT);
+		// Only what's in a copy's own way counts.
+		expect(stackBelow(block, (i) => (i ? [] : [r(UNIT, UNIT, UNIT, 3 * UNIT)]))).toBe(UNIT);
 	});
 });

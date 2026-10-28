@@ -1,19 +1,28 @@
 <script lang="ts">
-	// A student link: one problem, read straight from the address, e.g.
-	// /play?type=factor&p=x^2-x-6&start=positive. Nothing is stored anywhere.
+	// An activity link: one problem, read straight from the address, e.g.
+	// /play?type=factor&p=x^2-x-6&start=all, or /play?type=solve&p=2x+3=7.
+	// Solve's links carry live=0 when the teacher turned the live balance off.
+	// Nothing is stored anywhere.
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
-	import Activity from '$lib/Activity.svelte';
-	import { prettyText, readProblem, type ActivityType } from '$lib/algebra';
+	import ActivityBoard from '$lib/Activity.svelte';
+	import { prettyText, readProblem, type Activity } from '$lib/algebra';
 	import { readStart } from '$lib/settings';
 
 	const params = $derived(page.url.searchParams);
-	const type = $derived<ActivityType>(params.get('type') === 'factor' ? 'factor' : 'multiply');
+	const NAMES: Record<Activity, string> = {
+		multiply: 'Multiply',
+		factor: 'Factor',
+		solve: 'Solve'
+	};
+	const type = $derived<Activity>(
+		(Object.keys(NAMES) as Activity[]).find((t) => t === params.get('type')) ?? 'multiply'
+	);
 	const problem = $derived(readProblem(type, params.get('p') ?? ''));
 	const start = $derived(readStart(params.get('start')));
-	const title = $derived(
-		`${type === 'factor' ? 'Factor' : 'Multiply'} ${problem.ok ? prettyText(problem.given) : ''}`
-	);
+	/** Anything but live=0 keeps the live balance on, as links made before it did. */
+	const live = $derived(params.get('live') !== '0');
+	const title = $derived(`${NAMES[type]} ${problem.ok ? prettyText(problem.given) : ''}`);
 </script>
 
 <svelte:head>
@@ -22,7 +31,7 @@
 
 {#if problem.ok}
 	{#key page.url.search}
-		<Activity {problem} {start} />
+		<ActivityBoard {problem} {start} {live} />
 	{/key}
 {:else}
 	<main class="broken">

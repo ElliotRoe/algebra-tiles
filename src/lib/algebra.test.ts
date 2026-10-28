@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
 	checkEquation,
+	checkSolution,
 	factorizations,
 	formatPoly,
 	mul,
@@ -8,11 +9,22 @@ import {
 	readProblem,
 	type Problem
 } from './algebra';
-import { readStart, startingPiles } from './settings';
+import { panPiles, readStart, startingPiles } from './settings';
 
 const ok = (p: Problem) => {
 	if (!p.ok) throw new Error(p.reason);
+	if (p.type === 'solve') throw new Error('Not a Multiply or Factor problem');
 	return p;
+};
+const solve = (text: string) => {
+	const p = readProblem('solve', text);
+	if (!p.ok) throw new Error(p.reason);
+	if (p.type !== 'solve') throw new Error('Not a Solve problem');
+	return p;
+};
+const refusal = (text: string) => {
+	const p = readProblem('solve', text);
+	return p.ok ? '' : p.reason;
 };
 
 describe('readProblem: multiply', () => {
@@ -90,6 +102,63 @@ describe('readProblem: factor', () => {
 	});
 });
 
+describe('readProblem: solve', () => {
+	test('x on one side, the other or both', () => {
+		const p = solve('2x+3=7');
+		expect([p.left, p.right, p.solution]).toEqual([[3, 2], [7], 2]);
+		expect(p.given).toBe('2x+3=7');
+		expect(solve('7=2x+3').solution).toBe(2);
+		expect(solve('3x-4=x+6').solution).toBe(5);
+		expect(solve('-2x=6').solution).toBe(-3);
+		expect(solve('2x=-6').solution).toBe(-3);
+		expect(solve('2x=0').solution).toBe(0);
+		expect(solve('x+5=2').solution).toBe(-3);
+	});
+	test('x² only when it cancels', () => {
+		expect(solve('x^2+3x=x^2+6').solution).toBe(2);
+		expect(refusal('x^2+3x=6')).toContain('same on both sides');
+		expect(refusal('2x^2+x=x^2+1')).toContain('same on both sides');
+		expect(refusal('x^3=x^3+x')).toContain('highest power');
+	});
+	test('says why when tiles can’t solve it', () => {
+		expect(refusal('2(x+1)=6')).toContain('brackets');
+		expect(refusal('x+1=x+2')).toContain('no solution');
+		expect(refusal('2x+2=2+2x')).toContain('Every number');
+		expect(refusal('2x=3')).toContain('whole number');
+		expect(refusal('2x+3')).toContain('= sign');
+		expect(refusal('x=1=1')).toContain('one = sign');
+		expect(refusal('y+1=3')).toContain('Use x');
+		expect(refusal('x=4')).toContain('already solved');
+		expect(refusal('0.5x=2')).toContain('whole numbers');
+		expect(refusal('2x+=7')).toContain('finished');
+		expect(refusal('')).toContain('Type an equation');
+	});
+	test('Multiply and Factor still refuse an = sign', () => {
+		expect(readProblem('factor', '2x+3=7').ok).toBe(false);
+		expect(readProblem('multiply', '(x+1)(x+2)=0').ok).toBe(false);
+	});
+});
+
+describe('checkSolution', () => {
+	const p = solve('2x+3=7');
+	test('the number x stands for', () => {
+		expect(checkSolution(p, '2').ok).toBe(true);
+		expect(checkSolution(p, ' 2 ').ok).toBe(true);
+		expect(checkSolution(solve('-2x=6'), '-3').ok).toBe(true);
+	});
+	test('wrong and malformed answers', () => {
+		const message = (text: string) => {
+			const v = checkSolution(p, text);
+			return v.ok ? '' : v.message;
+		};
+		expect(message('3')).toContain('isn’t what x is');
+		expect(message('')).toContain('Type the number');
+		expect(message('x=2')).toContain('already there');
+		expect(message('2x')).toContain('without x');
+		expect(message('2+')).toContain('finished');
+	});
+});
+
 describe('factorizations', () => {
 	test('every one multiplies back', () => {
 		for (const poly of [[-6, -1, 1], [-2, 1, 6], [0, 4, 2], [-9, 0, 1], [6, 4], [6], [0, 0, 3]]) {
@@ -153,26 +222,30 @@ describe('starting tiles', () => {
 		expect(startingPiles(p, 'none')).toEqual([]);
 	});
 
-	test('Factor starts with the rectangle’s tiles, or only the positive ones', () => {
+	test('Factor starts with the rectangle’s tiles, zero pairs included', () => {
 		const p = ok(readProblem('factor', 'x^2-x-6'));
 		expect(count(startingPiles(p, 'all'))).toBe(12);
-		expect(startingPiles(p, 'positive')).toEqual([
-			{ kind: 'x2', sign: 1, n: 1 },
-			{ kind: 'x', sign: 1, n: 2 }
-		]);
 	});
 
-	test('Multiply can start with only the positive tiles', () => {
-		const p = ok(readProblem('multiply', '(x+2)(x-3)'));
-		expect(startingPiles(p, 'positive')).toEqual([
-			{ kind: 'x2', sign: 1, n: 1 },
-			{ kind: 'x', sign: 1, n: 4 },
-			{ kind: 'unit', sign: 1, n: 2 }
+	test('Solve starts with each side’s tiles in its pan', () => {
+		const p = solve('2x-3=x+4');
+		expect(panPiles(p, 'all')).toEqual([
+			[
+				{ kind: 'x', sign: 1, n: 2 },
+				{ kind: 'unit', sign: -1, n: 3 }
+			],
+			[
+				{ kind: 'x', sign: 1, n: 1 },
+				{ kind: 'unit', sign: 1, n: 4 }
+			]
 		]);
+		expect(panPiles(p, 'none')).toEqual([[], []]);
+		expect(count(panPiles(solve('x^2+3x=x^2+6'), 'all')[1])).toBe(7);
 	});
 
-	test('an unknown start falls back to all the tiles', () => {
-		expect(readStart('positive')).toBe('positive');
+	test('an unknown start, or an old link’s positive, falls back to all the tiles', () => {
+		expect(readStart('none')).toBe('none');
+		expect(readStart('positive')).toBe('all');
 		expect(readStart('lots')).toBe('all');
 	});
 });

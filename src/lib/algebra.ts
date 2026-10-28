@@ -1,6 +1,6 @@
 // The algebra behind a problem: reading typed math with Caret, the
-// polynomials it stands for, which problems tiles can build, and whether a
-// student's equation is right. Everything here is in one variable, x, with
+// polynomials it stands for, which problems tiles can build or solve, and
+// whether a student's equation or answer is right. Everything here is in one variable, x, with
 // whole-number coefficients, because that is what algebra tiles can show.
 
 import {
@@ -33,7 +33,7 @@ export interface Factor {
 	unit: number;
 }
 
-export type ActivityType = 'multiply' | 'factor';
+export type Activity = 'multiply' | 'factor' | 'solve';
 
 const parser = new CaretParser(equationParselets());
 
@@ -134,14 +134,31 @@ export function toPoly(node: TreeNode): Poly {
 
 // --- reading problems ---
 
-/** A problem a teacher typed, read as tiles see it. */
-/** A problem a teacher typed, read as tiles see it. Either form can be typed
- *  for either activity type: `given` is the form the student starts from (the
- *  factors to Multiply, the polynomial to Factor), as plain text, and `factors`
- *  is one way to build it. */
-export type Problem =
-	| { ok: true; type: ActivityType; factors: [Factor, Factor]; poly: Poly; given: string }
-	| { ok: false; reason: string };
+/** A Multiply or Factor problem a teacher typed, read as tiles see it. Either
+ *  form can be typed for either activity: `given` is the form the student
+ *  starts from (the factors to Multiply, the polynomial to Factor), as plain
+ *  text, and `factors` is one way to build it. */
+export interface Built {
+	ok: true;
+	type: 'multiply' | 'factor';
+	factors: [Factor, Factor];
+	poly: Poly;
+	given: string;
+}
+
+/** A Solve problem: an equation in x, its two sides as polynomials, and the
+ *  whole number x stands for. `given` is the equation as typed. */
+export interface Equation {
+	ok: true;
+	type: 'solve';
+	left: Poly;
+	right: Poly;
+	solution: number;
+	given: string;
+}
+
+/** A problem a teacher typed, read as tiles see it, or why it can't be one. */
+export type Problem = Built | Equation | { ok: false; reason: string };
 
 /** The factors written in a product, as typed: (x+2)(x−3) is two, 2x(x+3)
  *  is three (2, x and x+3), and (x+1)^2 is two. */
@@ -245,10 +262,11 @@ export function productText(factors: [Factor, Factor]): string {
 	return `${single(a) ? text(a) : `(${text(a)})`}(${text(b)})`;
 }
 
-/** Read what a teacher typed as a problem of one activity type, or say why it
+/** Read what a teacher typed as a problem of one activity, or say why it
  *  can't be one. Multiply takes the factors or the polynomial they make;
- *  Factor takes the polynomial or its factors. */
-export function readProblem(type: ActivityType, text: string): Problem {
+ *  Factor takes the polynomial or its factors; Solve takes an equation. */
+export function readProblem(type: Activity, text: string): Problem {
+	if (type === 'solve') return readEquation(text);
 	if (!text.trim()) return { ok: false, reason: 'Type a problem.' };
 	const node = parseText(text);
 	if (unbalanced(text) || hasErrors(node)) return { ok: false, reason: 'That isn’t finished yet.' };
@@ -303,6 +321,60 @@ export function readProblem(type: ActivityType, text: string): Problem {
 	};
 }
 
+/** Solve: read an equation a teacher typed, or say why tiles can't solve it.
+ *  It has to be linear in x with whole numbers, x on either side or both, and
+ *  a whole-number answer. x² may appear only if it cancels between the sides,
+ *  as in x² + 3x = x² + 6. Brackets are left to Multiply. */
+export function readEquation(text: string): Problem {
+	if (!text.trim()) return { ok: false, reason: 'Type an equation.' };
+	const node = parseText(text);
+	if (unbalanced(text) || hasErrors(node)) return { ok: false, reason: 'That isn’t finished yet.' };
+	if (!(node instanceof ComparisonNode) || node.operators.length !== 1 || node.operators[0] !== '=')
+		return { ok: false, reason: 'Type an equation, with one = sign, like 2x + 3 = 7.' };
+	if (/[()]/.test(text))
+		return {
+			ok: false,
+			reason: 'Leave out the brackets: multiply them out first. Multiply is the activity for that.'
+		};
+	let left: Poly;
+	let right: Poly;
+	try {
+		[left, right] = node.operands.map(toPoly);
+	} catch (e) {
+		if (e instanceof NotAPolynomial) return { ok: false, reason: e.message };
+		throw e;
+	}
+	if (degree(left) > 2 || degree(right) > 2)
+		return { ok: false, reason: 'Tiles go up to x², so keep the highest power at 2.' };
+	if ((left[2] ?? 0) !== (right[2] ?? 0))
+		return {
+			ok: false,
+			reason:
+				'Tiles can’t solve that with x² in it. x² can only be there if it’s the same on both sides, like x^2 + 3x = x^2 + 6.'
+		};
+	// Everything moved to the left: bx + c = 0.
+	const [c = 0, b = 0] = add(left, scale(right, -1));
+	if (b === 0)
+		return {
+			ok: false,
+			reason:
+				c === 0
+					? 'Every number is a solution to that, so there’s nothing to find.'
+					: 'That has no solution: the x’s cancel out but the numbers don’t.'
+		};
+	const solution = -c / b || 0;
+	if (!Number.isInteger(solution))
+		return {
+			ok: false,
+			reason: 'x isn’t a whole number there, so the units can’t split evenly. Try one like 2x = 6.'
+		};
+	const alone = (p: Poly) => polyEquals(p, [0, 1]);
+	const number = (p: Poly) => degree(p) <= 0;
+	if ((alone(left) && number(right)) || (alone(right) && number(left)))
+		return { ok: false, reason: 'That’s already solved: x is on its own.' };
+	return { ok: true, type: 'solve', left, right, solution, given: text.replace(/\s+/g, '') };
+}
+
 // --- checking the student's equation ---
 
 export type Verdict = { ok: true; note?: string } | { ok: false; message: string };
@@ -354,7 +426,7 @@ function isFactored(node: TreeNode): boolean {
 /** Check the equation a student typed for a problem: one side the product of
  *  factors, the other the simplified polynomial, either way round, both equal
  *  to the problem. */
-export function checkEquation(problem: Extract<Problem, { ok: true }>, text: string): Verdict {
+export function checkEquation(problem: Built, text: string): Verdict {
 	if (!text.trim()) return { ok: false, message: 'Type the whole equation, with an = sign.' };
 	const node = parseText(text);
 	if (unbalanced(text) || hasErrors(node))
@@ -403,6 +475,34 @@ export function checkEquation(problem: Extract<Problem, { ok: true }>, text: str
 		};
 	return { ok: true };
 }
+
+/** Solve: check the number a student typed after the printed x =. */
+export function checkSolution(problem: Equation, text: string): Verdict {
+	if (!text.trim()) return { ok: false, message: 'Type the number x stands for.' };
+	if (text.includes('='))
+		return { ok: false, message: 'Type just the number. The x = is already there.' };
+	const node = parseText(text);
+	if (unbalanced(text) || hasErrors(node))
+		return { ok: false, message: 'That isn’t finished yet.' };
+	let value: Poly;
+	try {
+		value = toPoly(node);
+	} catch (e) {
+		if (e instanceof NotAPolynomial) return { ok: false, message: e.message };
+		throw e;
+	}
+	if (degree(value) > 0) return { ok: false, message: 'Type a number, without x in it.' };
+	if (value[0] !== problem.solution)
+		return {
+			ok: false,
+			message: 'That isn’t what x is. Count the unit tiles across from the x tile.'
+		};
+	return { ok: true };
+}
+
+/** What a polynomial comes to with x set to a number. */
+export const evaluate = (p: Poly, x: number): number =>
+	p.reduce((sum, c, i) => sum + c * x ** i, 0);
 
 // --- writing math for people ---
 

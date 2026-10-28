@@ -121,18 +121,20 @@ interface Anchor {
 export const SNAP_REACH = 14;
 
 /** The lines on each axis that a tile can snap to: the inside edges of the T,
- *  the stops along each side, and the edges of the tiles nearby. */
-function anchorsFor(drop: Rect, others: Tile[], top: SideTile[], left: SideTile[]) {
+ *  the stops along each side, and the edges of the tiles nearby. With no T on
+ *  the board (`null` sides, as in Solve), only the tiles. */
+function anchorsFor(drop: Rect, others: Tile[], top: SideTile[] | null, left: SideTile[] | null) {
 	// The rectangle's edges of the T, and the sides' edges facing it: a tile on a
 	// side sits with its inner edge on the side's line, GAP from the rectangle.
-	const xs: Anchor[] = [
-		...sideStops(top).map((l) => ({ px: lenPx(l), len: l })),
-		{ px: -GAP, len: null, endOnly: true }
-	];
-	const ys: Anchor[] = [
-		...sideStops(left).map((l) => ({ px: lenPx(l), len: l })),
-		{ px: -GAP, len: null, endOnly: true }
-	];
+	const tee = (side: SideTile[] | null): Anchor[] =>
+		side
+			? [
+					...sideStops(side).map((l) => ({ px: lenPx(l), len: l })),
+					{ px: -GAP, len: null, endOnly: true }
+				]
+			: [];
+	const xs = tee(top);
+	const ys = tee(left);
 	const near = XLEN * 1.2;
 	for (const o of others) {
 		const r = rectOf(o);
@@ -148,7 +150,7 @@ function anchorsFor(drop: Rect, others: Tile[], top: SideTile[], left: SideTile[
 	}
 	// An edge lying on a side's line, like the inner edge of a tile already on
 	// that side, is that line: only a tile's far edge lands on it.
-	for (const a of [...xs, ...ys]) if (Math.abs(a.px + GAP) < EPS) a.endOnly = true;
+	if (top && left) for (const a of [...xs, ...ys]) if (Math.abs(a.px + GAP) < EPS) a.endOnly = true;
 	return { xs, ys };
 }
 
@@ -178,14 +180,15 @@ const onMat = (l: Len | null) => l !== null && lenPx(l) > -EPS;
 /** Where a tile dropped at (x, y) comes to rest: snapped to the edges near
  *  it, then slid to the nearest free spot if it would lie on another tile.
  *  `reach` is the snap distance in board pixels at the current zoom. `fixed`
- *  pins an axis, as on a side of the T, which holds a single row of tiles. */
+ *  pins an axis, as on a side of the T, which holds a single row of tiles.
+ *  `top` and `left` are the T's sides, or null when there's no T. */
 export function settle(
 	tile: Pick<Tile, 'kind' | 'turned'>,
 	x: number,
 	y: number,
 	others: Tile[],
-	top: SideTile[],
-	left: SideTile[],
+	top: SideTile[] | null,
+	left: SideTile[] | null,
 	reach: number,
 	fixed: { x?: number; y?: number } = {}
 ): Pick<Tile, 'x' | 'y' | 'at'> {
@@ -416,7 +419,7 @@ export function readRectangle(tiles: Tile[], poly: Poly): Result & { grid?: Grid
 	const ys = lines((t) => [t.at.y!, lenAdd(t.at.y!, size(t.kind, t.turned).h)]);
 	const index = (all: Len[], l: Len) => all.findIndex((a) => lenEq(a, l));
 
-	// Each tile must fill exactly one cell between neighbouring lines.
+	// Each tile must fill exactly one cell between neighboring lines.
 	const grid: (Tile | null)[][] = ys.slice(1).map(() => xs.slice(1).map(() => null));
 	const unaligned: number[] = [];
 	for (const t of tiles) {
@@ -640,4 +643,47 @@ export function zeroPairs(tiles: Tile[]): [Tile, Tile][] {
 		}
 	}
 	return out;
+}
+
+/** Zero pairs among selected tiles, which needn't lie flush: every positive
+ *  tile paired with a negative tile of the same kind, nearest first. Only
+ *  tiles in the same region can pair, as tiles in one pan of Solve's balance,
+ *  or both off it. Tiles left without a partner aren't in any pair. */
+export function pairUp<T extends Tile>(tiles: T[], region: (t: T) => string | null = () => null) {
+	const middle = (t: T) => {
+		const r = rectOf(t);
+		return { x: r.x + r.w / 2, y: r.y + r.h / 2 };
+	};
+	const options: { a: T; b: T; d: number }[] = [];
+	for (const a of tiles)
+		for (const b of tiles)
+			if (a.sign > 0 && b.sign < 0 && a.kind === b.kind && region(a) === region(b))
+				options.push({ a, b, d: distance(middle(a), middle(b)) });
+	options.sort((p, q) => p.d - q.d);
+	const used = new Set<number>();
+	const out: [T, T][] = [];
+	for (const { a, b } of options) {
+		if (used.has(a.id) || used.has(b.id)) continue;
+		used.add(a.id).add(b.id);
+		out.push([a, b]);
+	}
+	return out;
+}
+
+/** How far down to move a block of tiles so its copies lie directly below it,
+ *  flush, laid out the same: one block's height, or further until no copy
+ *  lies on anything in its way. `blocking(i)` is what copy i mustn't lie on. */
+export function stackBelow(block: Rect[], blocking: (i: number) => Rect[]): number {
+	const top = Math.min(...block.map((r) => r.y));
+	let dy = Math.max(...block.map((r) => r.y + r.h)) - top;
+	for (let n = 0; n < 500; n++) {
+		let next = dy;
+		block.forEach((r, i) => {
+			const moved = { ...r, y: r.y + dy };
+			for (const o of blocking(i)) if (overlaps(moved, o)) next = Math.max(next, o.y + o.h - r.y);
+		});
+		if (next === dy) return dy;
+		dy = next;
+	}
+	return dy;
 }

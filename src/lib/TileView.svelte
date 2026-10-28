@@ -1,6 +1,6 @@
 <script lang="ts">
 	// One algebra tile drawn at its true size: an x² tile is x by x, an x tile
-	// x by 1, a unit tile 1 by 1. Each is labelled with what it stands for, so
+	// x by 1, a unit tile 1 by 1. Each is labeled with what it stands for, so
 	// a negative tile reads as one without relying on its red alone.
 	import { lenPx, size, type Kind, type Sign } from './mat';
 
