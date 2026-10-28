@@ -1,418 +1,321 @@
 <script lang="ts">
-	// The teacher's page: choose Multiply or Factor, type one problem, and share
-	// it as a link (see docs/adr/0001-one-link-one-problem.md). Nothing is saved;
-	// the link carries the problem.
-	import { Check, Copy, ExternalLink, Plus, QrCode } from '@lucide/svelte';
-	import { onMount } from 'svelte';
+	// The teacher's page: every activity as a card with a worked example drawn
+	// in tiles. On a wide screen the page is two panels the height of the
+	// window: the cards scroll on their own, and the chosen one's details stay
+	// put beside them. On a narrow one, tapping a card slides them up in a drawer. Either
+	// way, Set up goes to the activity's own page to make an activity link.
+	import { Plus, X } from '@lucide/svelte';
+	import { onMount, tick, untrack } from 'svelte';
+	import { pushState } from '$app/navigation';
 	import { resolve } from '$app/paths';
-	import { formatPoly, prettyText, readProblem, type ActivityType } from '$lib/algebra';
-	import { STARTS, startingPiles, type Start } from '$lib/settings';
-	import MathInput from '$lib/MathInput.svelte';
-	import TileView from '$lib/TileView.svelte';
-	import Footer from '$lib/Footer.svelte';
+	import { page } from '$app/state';
+	import { prettyText, type Activity } from '$lib/algebra';
+	import { ACTIVITIES, activityInfo, type ActivityInfo } from '$lib/activities';
+	import ActivityPicture from '$lib/ActivityPicture.svelte';
 	import EmailDialog from '$lib/EmailDialog.svelte';
-	import { makeQr, qrExtent, qrPath, qrPng } from '$lib/qr';
+	import Footer from '$lib/Footer.svelte';
 	import favicon from '$lib/assets/favicon.svg';
 
-	let type = $state<ActivityType>('multiply');
-	let text = $state('');
-	let start = $state<Start>('all');
 	let suggest = $state<EmailDialog>();
 	const IDEA_BODY = "Here's something I'd like students to do with algebra tiles:\n\n";
-	let origin = $state('');
-	onMount(() => (origin = window.location.origin));
 
-	const problem = $derived(readProblem(type, text));
-	const query = $derived(
-		problem.ok
-			? new URLSearchParams({
-					type,
-					p: text.replace(/\s+/g, ''),
-					start
-				}).toString()
-			: ''
-	);
-	const link = $derived(query && origin ? `${origin}${resolve('/play')}?${query}` : '');
-	const summary = $derived.by(() => {
-		if (!problem.ok) return '';
-		if (problem.type === 'multiply')
-			return `Students build ${prettyText(problem.given)} and find ${formatPoly(problem.poly)}.`;
-		return `Students arrange ${prettyText(problem.given)} into a rectangle and read its factors off the sides.`;
+	/** Whether the details sit beside the cards, or come up in a drawer. */
+	let wide = $state(false);
+	/** The activity whose details show beside the cards, on a wide screen. */
+	let chosen = $state<Activity>(ACTIVITIES[0].activity);
+	onMount(() => {
+		const query = window.matchMedia('(min-width: 1024px)');
+		const update = () => (wide = query.matches);
+		update();
+		query.addEventListener('change', update);
+		return () => query.removeEventListener('change', update);
 	});
 
-	const TYPES: { type: ActivityType; name: string; about: string; example: string }[] = [
-		{
-			type: 'multiply',
-			name: 'Multiply',
-			about:
-				'Students lay out two factors on the T, fill in the rectangle, combine like terms and write the product.',
-			example: '(x+2)(x-3)'
-		},
-		{
-			type: 'factor',
-			name: 'Factor',
-			about:
-				'Students arrange a polynomial’s tiles into a rectangle, measure its sides and write the factors.',
-			example: 'x^2-x-6'
-		}
-	];
-	const example = $derived(TYPES.find((t) => t.type === type)!.example);
-
-	/** The tiles students will find beside the mat, for the problem typed. */
-	const piles = $derived(problem.ok ? startingPiles(problem, start) : []);
-	/** Drawn smaller when there are lots of them, so they fit the preview. */
-	const previewScale = $derived(piles.reduce((n, p) => n + p.n, 0) > 24 ? 0.36 : 0.48);
-
-	// --- sharing ---
-
-	let copied = $state<'link' | 'qr' | null>(null);
-	let copiedTimer: ReturnType<typeof setTimeout>;
-	let qrOpen = $state(false);
-	const qr = $derived(link ? makeQr(link) : null);
-
-	function flash(what: 'link' | 'qr') {
-		copied = what;
-		clearTimeout(copiedTimer);
-		copiedTimer = setTimeout(() => (copied = null), 1500);
+	function pick(a: Activity) {
+		if (wide) chosen = a;
+		// The drawer is a step in the browser's history, so Back closes it.
+		else pushState('', { sheet: a });
 	}
 
-	async function copyLink() {
-		try {
-			await navigator.clipboard.writeText(link);
-			flash('link');
-		} catch {
-			// The link is on screen to copy by hand.
+	// --- the drawer, on narrow screens ---
+
+	let sheet = $state<HTMLDialogElement>();
+	/** The activity the drawer shows, kept while it slides away. */
+	let shown = $state<Activity | null>(null);
+	/** Up on screen, as opposed to sliding in or out. */
+	let up = $state(false);
+	/** How far the drawer has been dragged down, in pixels. */
+	let drag = $state(0);
+	let dragging = $state(false);
+	const wanted = $derived(page.state.sheet ?? null);
+	const reduced = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+	$effect(() => {
+		const a = wanted;
+		untrack(() => {
+			if (a) open(a);
+			else if (shown) slideAway();
+		});
+	});
+	// Widening the window with the drawer open shows its activity beside the cards instead.
+	$effect(() => {
+		if (wide && wanted) {
+			chosen = wanted;
+			history.back();
 		}
+	});
+
+	async function open(a: Activity) {
+		shown = a;
+		drag = 0;
+		await tick();
+		if (!sheet?.open) sheet?.showModal();
+		requestAnimationFrame(() => (up = true));
 	}
 
-	async function copyQr() {
-		if (!qr) return;
-		try {
-			await navigator.clipboard.write([new ClipboardItem({ 'image/png': qrPng(qr) })]);
-			flash('qr');
-		} catch {
-			// Some browsers can't put images on the clipboard; the code is on screen.
-		}
+	function slideAway() {
+		up = false;
+		const done = () => {
+			sheet?.close();
+			shown = null;
+			drag = 0;
+		};
+		if (reduced()) done();
+		else setTimeout(done, 260);
+	}
+
+	/** Close from inside the page: step back past the drawer's history entry. */
+	function close() {
+		if (page.state.sheet) history.back();
+	}
+
+	let dragFrom = 0;
+	function grab(e: PointerEvent) {
+		if ((e.target as HTMLElement).closest('button')) return;
+		dragging = true;
+		dragFrom = e.clientY;
+		(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+	}
+	function pull(e: PointerEvent) {
+		if (dragging) drag = Math.max(0, e.clientY - dragFrom);
+	}
+	function release() {
+		if (!dragging) return;
+		dragging = false;
+		if (drag > 80) close();
+		else drag = 0;
 	}
 </script>
 
-<div class="page">
-	<header>
-		<p class="brand"><img src={favicon} alt="" width="28" height="28" /> Algebra Tiles</p>
-		<h1>Make a problem</h1>
-		<p class="lede">
-			Type one problem and share it as a link. Students build it with algebra tiles, one step at a
-			time, and write the equation at the end.
-		</p>
-	</header>
+<svelte:head>
+	<title>Algebra Tiles · Activities with algebra tiles</title>
+</svelte:head>
 
-	<div class="columns">
-		<section class="card">
-			<h2>What will students do?</h2>
-			<div class="types" role="radiogroup" aria-label="Activity type">
-				{#each TYPES as t (t.type)}
+{#snippet details(info: ActivityInfo, large: boolean)}
+	<div class="details-picture">
+		<ActivityPicture activity={info.activity} scale={large ? 0.56 : 0.66} />
+	</div>
+	<h2 id="details-{large ? 'panel' : 'sheet'}-title">{info.name}</h2>
+	<p class="tagline">{info.tagline}</p>
+	<h3>What students do</h3>
+	<ol class="steps">
+		{#each info.steps as step, i (i)}<li>{step}</li>{/each}
+	</ol>
+	<h3>Problems like</h3>
+	<ul class="problems">
+		{#each info.problemsLike as p (p)}<li>{prettyText(p)}</li>{/each}
+	</ul>
+{/snippet}
+
+<div class="page">
+	<div class="cards-side">
+		<header>
+			<p class="brand"><img src={favicon} alt="" width="40" height="40" /> Algebra Tiles</p>
+			<h1>Choose an activity</h1>
+			<p class="lede">Type one problem, then share the activity link with your students.</p>
+		</header>
+
+		<section class="cards" aria-label="Activities">
+			<ul class="grid">
+				{#each ACTIVITIES as a (a.activity)}
+					<li>
+						<button
+							type="button"
+							class="card"
+							class:on={chosen === a.activity}
+							aria-pressed={wide ? chosen === a.activity : undefined}
+							aria-haspopup={wide ? undefined : 'dialog'}
+							onclick={() => pick(a.activity)}
+						>
+							<span class="card-picture"><ActivityPicture activity={a.activity} scale={0.4} /></span
+							>
+							<span class="name">{a.name}</span>
+							<span class="about">{a.tagline}</span>
+						</button>
+					</li>
+				{/each}
+				<li>
 					<button
 						type="button"
-						role="radio"
-						aria-checked={type === t.type}
-						class="type"
-						class:chosen={type === t.type}
-						onclick={() => (type = t.type)}
+						class="suggest"
+						aria-haspopup="dialog"
+						onclick={() => suggest?.open()}
 					>
-						<span class="picture" aria-hidden="true">
-							{#if t.type === 'multiply'}
-								<TileView kind="x2" sign={1} scale={0.45} />
-								<TileView kind="x" sign={1} turned scale={0.45} />
-								<TileView kind="x" sign={-1} turned scale={0.45} />
-							{:else}
-								<span class="rect">
-									<TileView kind="x2" sign={1} scale={0.36} />
-									<TileView kind="x" sign={1} turned scale={0.36} />
-									<TileView kind="x" sign={-1} scale={0.36} />
-									<TileView kind="unit" sign={-1} scale={0.36} />
-								</span>
-							{/if}
-						</span>
-						<span class="name">{t.name}</span>
-						<span class="about">{t.about}</span>
+						<span class="plus"><Plus size={22} aria-hidden="true" /></span>
+						<span class="name">Suggest another activity</span>
+						<span class="about">Want students doing something else with tiles? Tell us.</span>
 					</button>
-				{/each}
-			</div>
-			<button type="button" class="suggest" aria-haspopup="dialog" onclick={() => suggest?.open()}>
-				<span class="plus"><Plus size={18} aria-hidden="true" /></span>
-				<span>
-					<span class="suggest-title">Want students doing something else?</span>
-					<span class="suggest-text">Suggest another algebra tiles activity for us to add.</span>
-				</span>
-			</button>
-
-			<label class="field-label" for="problem">
-				{type === 'multiply'
-					? 'The factors to multiply, or the polynomial they make'
-					: 'The polynomial to factor, or its factors'}
-			</label>
-			<div class="field">
-				<MathInput
-					bind:value={text}
-					id="problem"
-					placeholder="e.g. {example}"
-					aria-describedby="problem-status"
-					aria-invalid={text.trim() !== '' && !problem.ok}
-				/>
-			</div>
-			<p
-				id="problem-status"
-				class="status"
-				class:bad={text.trim() !== '' && !problem.ok}
-				aria-live="polite"
-			>
-				{#if problem.ok}{summary}{:else if text.trim()}{problem.reason}{:else}For example,
-					{prettyText(example)}.{/if}
-			</p>
-
-			<fieldset class="starts">
-				<legend>Students start with</legend>
-				<div class="start-grid">
-					<div class="start-list">
-						{#each STARTS as s (s.value)}
-							<label class="start" class:chosen={start === s.value}>
-								<input type="radio" name="start" value={s.value} bind:group={start} />
-								<span class="start-text">
-									<span class="start-name">{s.name}</span>
-									<span class="about">{s.about}</span>
-								</span>
-							</label>
-						{/each}
-					</div>
-					<!-- The tiles students will find beside the mat, for the choice and the problem typed. -->
-					<div class="preview" class:empty={start === 'none'} aria-live="polite">
-						{#if start === 'none'}
-							<svg
-								class="cross"
-								viewBox="0 0 100 100"
-								preserveAspectRatio="none"
-								aria-hidden="true"
-							>
-								<line x1="0" y1="0" x2="100" y2="100" />
-								<line x1="100" y1="0" x2="0" y2="100" />
-							</svg>
-							<p>Students start with no tiles</p>
-						{:else if !problem.ok}
-							<p>Type a problem to see the tiles students start with</p>
-						{:else}
-							<div class="piles" aria-label="The tiles students start with">
-								{#each piles as pile (pile.kind + pile.sign)}
-									<span class="pile">
-										{#each { length: pile.n }, i (i)}
-											<TileView kind={pile.kind} sign={pile.sign} scale={previewScale} />
-										{/each}
-									</span>
-								{/each}
-							</div>
-						{/if}
-					</div>
-				</div>
-			</fieldset>
-		</section>
-
-		<section class="card share" class:off={!link}>
-			<h2>Share it</h2>
-			<p class="link" class:waiting={!link} title={link}>
-				{link || 'The student link appears here once the problem works.'}
-			</p>
-			<div class="buttons">
-				<button type="button" class="btn-primary" disabled={!link} onclick={copyLink}>
-					{#if copied === 'link'}<Check size={16} /> Copied{:else}<Copy size={16} /> Copy student link{/if}
-				</button>
-				<!-- eslint-disable svelte/no-navigation-without-resolve -- the student page, with this problem in its address -->
-				<a
-					class="btn-ghost"
-					class:disabled={!link}
-					href={link || undefined}
-					target="_blank"
-					rel="noopener"
-					aria-disabled={!link}><ExternalLink size={16} /> Try it as a student</a
-				>
-				<!-- eslint-enable svelte/no-navigation-without-resolve -->
-				<button
-					type="button"
-					class="btn-ghost"
-					disabled={!link}
-					onclick={() => (qrOpen = !qrOpen)}
-					aria-expanded={qrOpen}
-				>
-					<QrCode size={16} />
-					{qrOpen ? 'Hide QR code' : 'QR code'}
-				</button>
-			</div>
-			{#if qrOpen && qr}
-				<div class="qr">
-					<svg
-						viewBox="0 0 {qrExtent(qr)} {qrExtent(qr)}"
-						width="200"
-						height="200"
-						role="img"
-						aria-label="QR code for the student link"
-					>
-						<rect width="100%" height="100%" fill="#fff" />
-						<path d={qrPath(qr)} fill="#000" />
-					</svg>
-					<button type="button" class="btn-ghost" onclick={copyQr}>
-						{#if copied === 'qr'}<Check size={16} /> Copied{:else}<Copy size={16} /> Copy QR code{/if}
-					</button>
-				</div>
-			{/if}
+				</li>
+			</ul>
 		</section>
 	</div>
 
+	<!-- On a wide screen, the chosen activity's details, staying put beside the cards. -->
+	<aside class="panel" aria-labelledby="details-panel-title">
+		<div class="panel-body">{@render details(activityInfo(chosen), true)}</div>
+		<a class="setup" href={resolve(`/${chosen}`)}>Set up {activityInfo(chosen).name} ▸</a>
+	</aside>
+
 	<Footer />
-	<EmailDialog
-		bind:this={suggest}
-		title="Suggest an activity"
-		subject="Algebra Tiles activity idea"
-		body={IDEA_BODY}
-	>
-		<p>
-			So far students can multiply and factor polynomials. What else would you like them to do with
-			algebra tiles? Solving equations, completing the square, something else? Email us your idea
-			and we’ll look at adding it.
-		</p>
-	</EmailDialog>
 </div>
 
+<!-- On a narrow screen, the details slide up from the bottom. -->
+<dialog
+	bind:this={sheet}
+	class="sheet"
+	class:up
+	class:dragging
+	style:--drag="{drag}px"
+	aria-labelledby="details-sheet-title"
+	oncancel={(e) => {
+		e.preventDefault();
+		close();
+	}}
+	onclick={(e) => e.target === sheet && close()}
+>
+	{#if shown}
+		{@const info = activityInfo(shown)}
+		<!-- svelte-ignore a11y_no_static_element_interactions (dragging is extra: the close button, Escape and Back close it too) -->
+		<div
+			class="grab"
+			onpointerdown={grab}
+			onpointermove={pull}
+			onpointerup={release}
+			onpointercancel={release}
+		>
+			<span class="handle" aria-hidden="true"></span>
+			<button type="button" class="close" aria-label="Close" onclick={close}>
+				<X size={20} />
+			</button>
+		</div>
+		<div class="sheet-body">
+			{@render details(info, false)}
+		</div>
+		<div class="sheet-foot">
+			<a class="setup" href={resolve(`/${info.activity}`)}>Set up {info.name} ▸</a>
+		</div>
+	{/if}
+</dialog>
+
+<EmailDialog
+	bind:this={suggest}
+	title="Suggest an activity"
+	subject="Algebra Tiles activity idea"
+	body={IDEA_BODY}
+>
+	<p>
+		So far students can multiply and factor polynomials and solve equations. What else would you
+		like them to do with algebra tiles? Completing the square, something else? Email us your idea
+		and we’ll look at adding it.
+	</p>
+</EmailDialog>
+
 <style>
+	/* The footer sits at the bottom of the window, or below the cards when
+	   they're taller than it. */
 	.page {
+		display: flex;
+		flex-direction: column;
+		min-height: 100dvh;
 		max-width: 72rem;
 		margin: 0 auto;
 		padding: 2rem 1.25rem 1.5rem;
 	}
-	/* The problem on the left; sharing it on the right, staying in view. */
-	.columns {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) 21rem;
-		gap: 1.25rem;
-		align-items: start;
-	}
-	.columns .share {
-		position: sticky;
-		top: 1.25rem;
-	}
-	@media (max-width: 960px) {
-		.columns {
-			grid-template-columns: 1fr;
-		}
-		.columns .share {
-			position: static;
-		}
+	.cards-side {
+		flex: 1;
 	}
 	.brand {
 		display: flex;
 		align-items: center;
-		gap: 0.5rem;
+		gap: 0.6rem;
 		color: var(--accent);
-		font-size: 1.05rem;
-		font-weight: 700;
+		font-size: 1.85rem;
+		font-weight: 800;
+		letter-spacing: -0.01em;
 	}
 	h1 {
-		margin-top: 0.4rem;
-		font-size: 2.2rem;
+		margin-top: 1rem;
+		font-size: 1.6rem;
 		font-weight: 700;
+		line-height: 1.15;
 	}
 	.lede {
-		margin-top: 0.3rem;
+		max-width: 44rem;
+		margin-top: 0.4rem;
 		color: var(--muted);
 		line-height: 1.5;
 	}
-	.card {
-		margin-top: 1.25rem;
-		padding: 1.25rem;
-		border: 1px solid var(--line);
-		border-radius: 14px;
-		background: var(--paper);
-		box-shadow: 0 1px 2px rgb(29 40 56 / 0.06);
+	.cards {
+		margin-top: 1.5rem;
 	}
-	h2 {
-		font-size: 1.1rem;
-		font-weight: 700;
+	.panel {
+		display: none;
 	}
-	.types {
+	.grid {
 		display: grid;
-		grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+		grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr));
 		gap: 0.75rem;
-		margin-top: 0.75rem;
+		padding: 0;
+		list-style: none;
 	}
-	.type {
+	.grid li {
 		display: flex;
-		flex-direction: column;
-		align-items: flex-start;
-		gap: 0.3rem;
-		padding: 0.85rem;
-		border: 2px solid var(--line);
-		border-radius: 12px;
-		background: var(--paper);
-		color: var(--ink);
-		text-align: left;
-		cursor: pointer;
 	}
-	.type:hover {
-		border-color: var(--line-strong);
-	}
-	.type.chosen {
-		border-color: var(--accent);
-		background: var(--accent-wash);
-	}
-	/* Asking for a kind of activity we don't have yet, under the ones we do. */
+	.card,
 	.suggest {
 		display: flex;
-		align-items: center;
-		gap: 0.75rem;
+		flex-direction: column;
+		gap: 0.3rem;
 		width: 100%;
-		margin-top: 0.75rem;
-		padding: 0.7rem 0.85rem;
-		border: 2px dashed var(--line-strong);
-		border-radius: 12px;
-		background: none;
+		padding: 0.75rem;
+		border-radius: 14px;
 		color: var(--ink);
+		font: inherit;
 		text-align: left;
 		cursor: pointer;
 	}
-	.suggest:hover {
-		border-color: var(--accent);
-		background: var(--accent-wash);
+	.card {
+		border: 2px solid var(--line);
+		background: var(--paper);
+		box-shadow: 0 1px 2px rgb(29 40 56 / 0.06);
+		transition:
+			border-color 0.15s,
+			transform 0.15s;
 	}
-	.plus {
+	.card:hover {
+		border-color: var(--line-strong);
+		transform: translateY(-2px);
+	}
+	.card-picture {
 		display: grid;
-		flex: none;
 		place-items: center;
-		width: 2rem;
-		height: 2rem;
-		border-radius: 50%;
-		background: var(--accent-wash);
-		color: var(--accent);
-	}
-	.suggest-title {
-		display: block;
-		font-weight: 700;
-	}
-	.suggest-text {
-		display: block;
-		color: var(--muted);
-		font-size: 0.88rem;
-	}
-	.picture {
-		display: flex;
-		align-items: flex-start;
-		gap: 2px;
-		height: 3rem;
-		margin-bottom: 0.3rem;
-	}
-	.rect {
-		display: grid;
-		grid-template-columns: auto auto;
-		gap: 2px;
+		margin-bottom: 0.35rem;
+		padding: 0.6rem 0.4rem;
+		border-radius: 9px;
+		background: var(--ground);
 	}
 	.name {
-		font-size: 1.05rem;
+		font-size: 1.1rem;
 		font-weight: 700;
 	}
 	.about {
@@ -420,161 +323,259 @@
 		font-size: 0.88rem;
 		line-height: 1.4;
 	}
-	.field-label {
-		display: block;
-		margin-top: 1.25rem;
-		font-weight: 600;
+	/* Asking for a kind of activity we don't have yet, the same size as the others. */
+	.suggest {
+		align-items: center;
+		justify-content: center;
+		border: 2px dashed var(--line-strong);
+		background: none;
+		text-align: center;
 	}
-	.field {
-		margin-top: 0.4rem;
-	}
-	.status {
-		min-height: 1.4rem;
-		margin-top: 0.5rem;
-		color: var(--muted);
-		font-size: 0.9rem;
-	}
-	.starts {
-		margin-top: 1.1rem;
-		padding: 0;
-		border: none;
-	}
-	.starts legend {
-		font-weight: 600;
-	}
-	/* The choices on the left, and one preview of the chosen one beside them,
-	   as tall as all of them. */
-	.start-grid {
-		display: grid;
-		grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr);
-		gap: 0.75rem;
-		margin-top: 0.45rem;
-	}
-	.start-list {
-		display: flex;
-		flex-direction: column;
-		gap: 0.45rem;
-	}
-	.start {
-		display: flex;
-		align-items: flex-start;
-		gap: 0.6rem;
-		padding: 0.6rem 0.75rem;
-		border: 2px solid var(--line);
-		border-radius: 10px;
-		cursor: pointer;
-	}
-	.start.chosen {
+	.suggest:hover {
 		border-color: var(--accent);
 		background: var(--accent-wash);
 	}
-	.start input {
-		margin-top: 0.2rem;
-		accent-color: var(--accent);
-	}
-	.start-text {
-		display: flex;
-		flex-direction: column;
-		gap: 0.1rem;
-	}
-	.start-name {
-		font-weight: 600;
-	}
-	.preview {
-		position: relative;
+	.plus {
 		display: grid;
 		place-items: center;
-		min-height: 10rem;
-		padding: 0.9rem;
-		overflow: hidden;
-		border: 1px solid var(--line);
+		width: 2.6rem;
+		height: 2.6rem;
+		margin-bottom: 0.3rem;
+		border-radius: 50%;
+		background: var(--accent-wash);
+		color: var(--accent);
+	}
+	/* On a wide screen, two panels the height of the window, and the page
+	   itself doesn't scroll: the cards scroll on their own, on the left, and
+	   the details stay put on the right, scrolling inside only when they're
+	   taller than the window, with Set up always at the bottom. */
+	@media (min-width: 1024px) {
+		.page {
+			display: grid;
+			grid-template-columns: minmax(0, 1fr) 26rem;
+			grid-template-rows: minmax(0, 1fr) auto;
+			max-width: 90rem;
+			height: 100dvh;
+			min-height: 0;
+			padding: 0;
+			overflow: hidden;
+		}
+		/* Below both panels, along the bottom of the window. */
+		.page.page > :global(footer) {
+			grid-column: 1 / -1;
+			margin: 0;
+			padding: 0.6rem 1rem 0.8rem;
+			border-top: 1px solid var(--line);
+		}
+		.cards-side {
+			min-height: 0;
+			padding: 2rem 1.5rem 1.5rem 2rem;
+			overflow-y: auto;
+		}
+		.grid {
+			grid-template-columns: repeat(auto-fill, minmax(15rem, 1fr));
+			gap: 1rem;
+		}
+		.card-picture {
+			--picture-scale: 0.55;
+		}
+		.card.on {
+			border-color: var(--accent);
+			background: var(--accent-wash);
+		}
+		.panel {
+			display: flex;
+			flex-direction: column;
+			/* The column's full height whichever activity is chosen, so Set up
+			   stays in the same place at the bottom. */
+			min-height: 0;
+			margin: 1.25rem 1.25rem 1.25rem 0;
+			padding: 1.25rem;
+			border: 1px solid var(--line);
+			border-radius: 14px;
+			background: var(--paper);
+			box-shadow: 0 6px 24px rgb(29 40 56 / 0.08);
+		}
+		.panel-body {
+			flex: 1;
+			min-height: 0;
+			margin: -0.25rem;
+			padding: 0.25rem;
+			overflow-y: auto;
+		}
+		.panel .setup {
+			flex: none;
+			margin-top: 0.85rem;
+		}
+	}
+
+	/* In a short window, the panel's picture is smaller, so the details fit. */
+	@media (min-width: 1024px) and (max-height: 860px) {
+		.panel .details-picture {
+			--picture-scale: 0.42;
+		}
+	}
+	@media (min-width: 1024px) and (max-height: 700px) {
+		.panel .details-picture {
+			--picture-scale: 0.32;
+		}
+	}
+
+	/* The details, beside the cards or in the drawer. */
+	.details-picture {
+		display: grid;
+		place-items: center;
+		padding: 0.75rem 0.5rem;
 		border-radius: 10px;
 		background: var(--ground);
 	}
-	.preview p {
-		position: relative;
-		max-width: 14rem;
+	h2 {
+		margin-top: 0.75rem;
+		font-size: 1.6rem;
+		font-weight: 700;
+	}
+	.tagline {
+		margin-top: 0.2rem;
+		color: var(--ink-soft);
+		line-height: 1.45;
+	}
+	h3 {
+		margin-top: 0.9rem;
 		color: var(--muted);
-		font-size: 0.88rem;
-		font-weight: 600;
-		text-align: center;
+		font-size: 0.75rem;
+		font-weight: 700;
+		letter-spacing: 0.06em;
+		text-transform: uppercase;
 	}
-	/* No tiles: a grey box, crossed out faintly. */
-	.preview.empty {
-		background: var(--paper-low);
+	.steps {
+		display: grid;
+		gap: 0.4rem;
+		margin-top: 0.45rem;
+		padding-left: 1.3rem;
+		color: var(--ink-soft);
+		line-height: 1.45;
+		list-style: decimal;
 	}
-	.cross {
-		position: absolute;
-		inset: 0;
-		width: 100%;
-		height: 100%;
+	.steps li::marker {
+		color: var(--accent);
+		font-weight: 700;
 	}
-	.cross line {
-		stroke: var(--line);
-		stroke-width: 1.5;
-		vector-effect: non-scaling-stroke;
-	}
-	.piles {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 6px;
-	}
-	.pile {
+	.problems {
 		display: flex;
 		flex-wrap: wrap;
-		justify-content: center;
-		align-items: flex-end;
-		gap: 3px;
+		gap: 0.4rem;
+		margin-top: 0.45rem;
+		padding: 0;
+		list-style: none;
 	}
-	@media (max-width: 560px) {
-		.start-grid {
-			grid-template-columns: 1fr;
-		}
-	}
-	.status.bad {
-		color: var(--bad);
-		font-weight: 600;
-	}
-	.share.off {
-		opacity: 0.7;
-	}
-	.link {
-		margin-top: 0.5rem;
-		padding: 0.6rem 0.75rem;
-		overflow: hidden;
-		border-radius: 8px;
+	.problems li {
+		padding: 0.3rem 0.6rem;
+		border-radius: 7px;
 		background: var(--paper-low);
 		color: var(--ink-soft);
-		font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-		font-size: 0.85rem;
-		text-overflow: ellipsis;
+		font-weight: 600;
 		white-space: nowrap;
 	}
-	/* In the narrow column, the buttons stack, one full-width button each. */
-	.link.waiting {
-		font-family: inherit;
-		white-space: normal;
+	.setup {
+		display: block;
+		padding: 0.85rem 1rem;
+		border-radius: 10px;
+		background: var(--accent);
+		color: var(--paper);
+		font-size: 1.05rem;
+		font-weight: 700;
+		text-align: center;
+		text-decoration: none;
 	}
-	.buttons {
+	.setup:hover {
+		background: var(--accent-dark);
+	}
+
+	/* The drawer: a sheet from the bottom of the window, over a dimmed page. */
+	.sheet {
+		position: fixed;
+		inset: auto 0 0 0;
+		width: 100%;
+		max-width: 40rem;
+		max-height: 88dvh;
+		margin: 0 auto;
+		padding: 0;
+		border: none;
+		border-radius: 18px 18px 0 0;
+		background: var(--paper);
+		color: var(--ink);
+		box-shadow: 0 -12px 40px rgb(29 40 56 / 0.2);
+		transform: translateY(100%);
+		transition: transform 0.26s cubic-bezier(0.2, 0.8, 0.3, 1);
+	}
+	.sheet[open] {
 		display: flex;
 		flex-direction: column;
-		gap: 0.5rem;
-		margin-top: 0.75rem;
 	}
-	a.disabled {
-		pointer-events: none;
-		color: #9aa7b8;
-		border-color: var(--line);
+	.sheet.up {
+		transform: translateY(var(--drag));
 	}
-	.qr {
-		display: flex;
-		flex-direction: column;
-		align-items: center;
-		gap: 0.75rem;
-		margin-top: 1rem;
+	.sheet.dragging {
+		transition: none;
+	}
+	.sheet::backdrop {
+		background: rgb(29 40 56 / 0.4);
+	}
+	@media (prefers-reduced-motion: reduce) {
+		.sheet,
+		.card {
+			transition: none;
+		}
+	}
+	:global(html:has(dialog.sheet[open])) {
+		overflow: hidden;
+	}
+	.grab {
+		position: relative;
+		display: grid;
+		flex: none;
+		place-items: center;
+		height: 2.5rem;
+		cursor: grab;
+		touch-action: none;
+	}
+	.handle {
+		width: 2.75rem;
+		height: 5px;
+		border-radius: 3px;
+		background: var(--line-strong);
+	}
+	.close {
+		position: absolute;
+		top: 0.35rem;
+		right: 0.5rem;
+		display: grid;
+		place-items: center;
+		width: 2.2rem;
+		height: 2.2rem;
+		border: none;
+		border-radius: 8px;
+		background: none;
+		color: var(--muted);
+		cursor: pointer;
+	}
+	.close:hover {
+		background: var(--paper-low);
+	}
+	.sheet-body {
+		flex: 1;
+		min-height: 0;
+		padding: 0 1.25rem 1rem;
+		overflow-y: auto;
+		overscroll-behavior: contain;
+	}
+	.sheet-foot {
+		flex: none;
+		padding: 0.75rem 1.25rem calc(0.75rem + env(safe-area-inset-bottom));
+		border-top: 1px solid var(--line);
+		background: var(--paper);
 	}
 	.page :global(footer) {
-		margin-top: 2rem;
+		margin-top: 2.5rem;
 	}
 </style>

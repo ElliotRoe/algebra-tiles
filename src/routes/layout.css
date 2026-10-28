@@ -1,6 +1,6 @@
 @import 'tailwindcss';
 
-/* Morphology Mash's paper-and-ink look, in blue: pale blue-grey paper on a
+/* Morphology Mash's paper-and-ink look, in blue: pale blue-gray paper on a
    cool ground, navy ink, and a strong blue accent. Plain sans throughout. */
 :root {
 	--ground: #e7edf5;
@@ -22,7 +22,7 @@
 	--bad-wash: #fbe3de;
 	--bad-line: #f0c3b9;
 
-	/* The tiles, in the colours classroom sets use, softened to sit on blue
+	/* The tiles, in the colors classroom sets use, softened to sit on blue
 	   paper. Every negative tile is red, whatever its shape. */
 	--x2-fill: #8fb3ee;
 	--x2-edge: #4a78c8;

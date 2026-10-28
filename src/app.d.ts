@@ -5,7 +5,10 @@ declare global {
 		// interface Error {}
 		// interface Locals {}
 		// interface PageData {}
-		// interface PageState {}
+		interface PageState {
+			/** The gallery's details drawer, open on narrow screens for this activity. */
+			sheet?: import('$lib/algebra').Activity;
+		}
 		// interface Platform {}
 	}
 }

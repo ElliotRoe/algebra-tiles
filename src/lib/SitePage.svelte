@@ -26,13 +26,21 @@
 </div>
 
 <style>
+	/* The footer sits at the bottom of the window, or after the page when it's taller. */
 	.page {
+		display: flex;
+		flex-direction: column;
+		min-height: 100dvh;
 		max-width: 46rem;
 		margin: 0 auto;
 		padding: 2rem 1.25rem 1.5rem;
 	}
+	.page > :global(footer) {
+		margin-top: auto;
+	}
 	.brand {
 		display: inline-flex;
+		align-self: flex-start;
 		align-items: center;
 		gap: 0.5rem;
 		color: var(--accent);
