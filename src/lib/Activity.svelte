@@ -1788,7 +1788,7 @@
 
 	<!-- The problem, its steps and the step's Check, in one bar across the top.
 	     On the last step, the answer field takes the steps' place. -->
-	<div class="top" bind:this={headerEl}>
+	<div class="topbar" bind:this={headerEl}>
 		<header class="bar">
 			<span class="kind"
 				>{p.type === 'multiply' ? 'Multiply' : p.type === 'factor' ? 'Factor' : 'Solve'}</span
@@ -2548,7 +2548,7 @@
 	}
 	/* The top bar, one row: the activity │ the problem │ the steps … Check.
 	   On a narrow screen it wraps, the steps (or the answer) on a row of their own. */
-	.top {
+	.topbar {
 		position: absolute;
 		top: 0.75rem;
 		left: 0.75rem;
@@ -2560,7 +2560,7 @@
 		gap: 0.4rem;
 		pointer-events: none;
 	}
-	.top > * {
+	.topbar > * {
 		pointer-events: auto;
 	}
 	.bar {
